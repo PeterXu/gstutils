@@ -1,3 +1,19 @@
+function gst_which(shcmd)
+    local line = string.format("which %s >/dev/null", shcmd)
+    return os.execute(line)
+end
+
+function gst_launch(opts)
+    local name1 = "./gst-launch"
+    local name2 = "gst-launch-1.0"
+    if gst_which(name1) then
+        return string.format("%s %s", name1, opts)
+    elseif gst_which(name2) then
+        return string.format("%s %s", name2, opts)
+    end
+    return nil
+end
+
 function gst_inspect(plugin)
     local line = string.format("gst-inspect-1.0 --exists %s", plugin)
     return os.execute(line)
@@ -29,7 +45,7 @@ function gst_typefind_demux(src)
     return demux
 end
 
-function gst_transcode(src, start, speed, width, height, fps, bps, fd, outf)
+function gst_transcode(src, start, speed, width, height, fps, bps, outf)
     local vcodec = gst_inspect_vcodec(bps)
     if vcodec == nil then
         return nil
@@ -40,50 +56,103 @@ function gst_transcode(src, start, speed, width, height, fps, bps, fd, outf)
         return nil
     end
 
-    start = "00:00:00"
-    local await = string.format("avwait mode=timecode target-timecode-string=\"00:00:40:00\" ! audio/x-raw")
-    local vwait = string.format("avwait mode=timecode target-timecode-string=\"00:00:40:00\" ! video/x-raw")
+    local opts = ""
+
+    local sink
+    local dst = tonumber(outf)
+    if dst == nil then
+        sink = string.format("filesink location=%s", outf)
+    else
+        sink = string.format("fdsink fd=%d", dst)
+        if dst == 1 then
+            opts = "-q"
+        end
+    end
+
+    local await = string.format("avwait mode=timecode target-timecode-string=\"%s:00\" ! audio/x-raw", start)
+    local arate = string.format("speed speed=%f", speed)
+
+    local vwait = string.format("avwait mode=timecode target-timecode-string=\"%s:00\" ! video/x-raw", start)
     local vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
     local vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
-    local sink = string.format("filesink location=%s", outf)
-    if fd >= 0 and fd <= 65535 then
-        sink = string.format("fdsink fd=%d", fd)
-    end
 
     local line
 
-    if true then
-    line = string.format([[
-        gst-launch-1.0 filesrc location=%s ! %s name=demux \
-         demux.audio_0 ! queue ! mpegtsmux name=mux \
-         demux.video_0 ! decodebin ! %s ! queue ! %s ! %s ! %s ! mux. \
-         mux. ! %s]],
-        src, demux,
-        vwait, vrate, vscale, vcodec, sink);
-    return line
+    -- audio-only
+    if false then
+        line = string.format([[
+            %s filesrc location=%s ! %s name=demux \
+            demux.audio_0 ! decodebin ! audioconvert ! %s ! avenc_aac ! mpegtsmux name=mux \
+            mux. ! %s \
+            ]],
+            gst_launch(opts), src, demux,
+            arate,
+            sink);
+        return line
     end
 
+    -- video-only
+    if false then
+        line = string.format([[
+            %s filesrc location=%s ! %s name=demux \
+            demux.video_0 ! decodebin ! %s ! %s ! %s ! mpegtsmux name=mux \
+            mux. ! %s]],
+            gst_launch(opts), src, demux,
+            vrate, vscale, vcodec,
+            sink);
+        return line
+    end
+
+    -- audio and video
+    if true then
+        arate = string.format("queue ! %s", arate)
+        vrate = string.format("queue ! %s", vrate)
+        line = string.format([[
+            %s filesrc location=%s ! %s name=demux \
+            demux.audio_0 ! decodebin ! audioconvert ! %s ! avenc_aac ! mpegtsmux name=mux \
+            demux.video_0 ! decodebin ! %s ! %s ! %s ! mux. \
+            mux. ! %s]],
+            gst_launch(opts), src, demux,
+            arate,
+            vrate, vscale, vcodec,
+            sink);
+        return line
+    end
+
+    -- copy
     line = string.format([[
-        gst-launch-1.0 filesrc location=%s ! %s name=demux \
+        %s filesrc location=%s ! %s name=demux \
          demux.audio_0 ! queue ! mpegtsmux name=mux \
-         demux.video_0 ! decodebin ! queue ! %s ! mux. \
+         demux.video_0 ! queue ! mux. \
          mux. ! %s]],
-        src, demux, codec, sink);
+        gst_launch(opts), src, demux,
+        sink);
     return line;
 end
 
 
 function test_gst()
-    local fname = "/Users/peter/Downloads/samples/SampleVideo_1280x720_20mb.mp4"
-    start = "00:00:10"
+    local fname = "/Users/peter/Downloads/samples/sample-h264.mp4"
+    start = "00:00:00"
     speed = 1.0
     width = 1280/2
     height = 720/2
     fps = 25
     bps = 500*1000
-    local cmd = gst_transcode(fname, start, speed, width, height, fps, bps, -1, "/tmp/out.ts")
+
+    local cmd
+    if true then
+        cmd = gst_transcode(fname, start, speed, width, height, fps, bps, "/tmp/out.ts")
+    else
+        cmd = gst_transcode(fname, start, speed, width, height, fps, bps, 1)
+        cmd = string.format("%s >/tmp/out_fd.ts", cmd)
+    end
+
     print(cmd)
+    local begintm = os.time();
     os.execute(cmd)
+    local endtm = os.time();
+    print(os.difftime(endtm, begintm))
 end
 
 test_gst()
