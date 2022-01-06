@@ -50,6 +50,8 @@ function gst_format_demux(container)
         demux = "qtdemux"
     elseif container == "Matroska" then
         demux = "matroskademux"
+    elseif string.find(container, "MPEG.2 Transport Stream") then 
+        demux = "tsdemux"
     end
     return demux
 end
@@ -179,8 +181,8 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
         -- support start-tc.
         line = string.format([[%s ! parsebin name=pb \
             pb. ! %s ! decodebin ! videoconvert ! video/x-raw \
-                ! timecodestamper ! %s ! avwait name=wait target-timecode-string="%s" \
-                wait. ! %s \
+                ! %s ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
+                ! %s \
                 ! %s ! %s name=mux \
             mux. ! %s]],
             filesrc,
@@ -196,7 +198,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
             ! avwait name=wait target-timecode-string="%s" \
             ! avenc_aac ! queue ! %s name=mux \
         pb. ! queue ! %s ! queue ! decodebin ! videoconvert ! video/x-raw \
-            ! timecodestamper ! %s ! wait. \
+            ! %s ! timecodestamper ! wait. \
             wait. ! queue ! %s  \
             ! %s ! queue ! mux. \
         mux. ! %s]],
@@ -233,6 +235,8 @@ function test_gst(fname, outf, stdout)
     print(os.difftime(endtm, begintm))
 end
 
-test_gst("/Users/peter/Downloads/samples/sample-h264.mp4", "/tmp/out_mp4.ts")
---test_gst("/Users/peter/Downloads/samples/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
+--test_gst("/tmp/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
+--test_gst("/tmp/sample-h265.mp4", "/tmp/out2_mp4.ts")
+--test_gst("/tmp/sample-h264.mp4", "/tmp/out_mp4.ts")
+--test_gst("/tmp/out_mp4.ts", "/tmp/out_ts.ts")
 
