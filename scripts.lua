@@ -116,103 +116,105 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     local opts = ""
 
     -- check output sink
-    local sink
+    local filesink
     local dst = tonumber(outf)
     if dst == nil then
-        sink = string.format("filesink location=%s", outf)
+        filesink = string.format("filesink location=%s", outf)
     else
-        sink = string.format("fdsink fd=%d", dst)
+        filesink = string.format("fdsink fd=%d", dst)
         if dst == 1 then
             opts = "-q"
         end
     end
 
-    local await = string.format("avwait mode=timecode target-timecode-string=\"%s:00\" ! audio/x-raw", start)
+    local start_tc = string.format([[%s:00]], start)
     local arate = string.format("speed speed=%f", speed)
-
-    local vwait = string.format("avwait mode=timecode target-timecode-string=\"%s:00\" ! video/x-raw", start)
     local vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
     local vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
 
     -- gst-launch command line
     local line
     local outmux = "mpegtsmux"
+    local filesrc = string.format([[%s filesrc location="%s"]], gst_launch(opts), src)
 
     -- copy audio/video
     if false or copy then
         if demux == "matroskademux" then outmux = "matroskamux" end
         if false or (aparse and vparse) then
-            line = string.format([[
-                %s filesrc location=%s ! %s name=demux \
+            line = string.format([[%s ! %s name=demux \
                 demux.audio_0 ! queue ! %s ! %s name=mux \
                 demux.video_0 ! queue ! %s ! mux. \
                 mux. ! queue ! %s]],
-                gst_launch(opts), src, demux,
-                aparse, outmux,
-                vparse,
-                sink);
+                filesrc, demux,
+                aparse, outmux, vparse,
+                filesink);
         else
             local tmp_parse = aparse
             if vparse then tmp_parse = vparse end
-            line = string.format([[
-                %s filesrc location=%s ! parsebin name=pb \
+            line = string.format([[%s ! parsebin name=pb \
                 pb. ! %s ! queue ! %s name=mux \
                 mux. ! %s]],
-                gst_launch(opts), src, 
+                filesrc,
                 tmp_parse, outmux,
-                sink);
+                filesink);
         end
         return line
     end
 
     -- audio-only
     if false or (aparse and not vparse) then
-        line = string.format([[
-            %s filesrc location=%s ! parsebin name=pb \
-            pb. ! %s ! decodebin ! audioconvert ! %s ! avenc_aac ! %s name=mux \
-            mux. ! %s \
-            ]],
-            gst_launch(opts), src,
+        -- unsupport start-tc
+        line = string.format([[%s ! parsebin name=pb \
+            pb. ! queue ! %s ! queue ! decodebin ! audioconvert ! audio/x-raw ! %s \
+                ! avenc_aac ! queue ! %s name=mux \
+            mux. ! %s ]],
+            filesrc,
             aparse, arate, outmux,
-            sink);
+            filesink);
         return line
     end
 
     -- video-only
     if false or (not aparse and vparse) then
-        line = string.format([[
-            %s filesrc location=%s ! parsebin name=pb \
-            pb. ! %s ! decodebin ! %s ! %s ! videoconvert ! %s ! %s name=mux \
+        -- support start-tc.
+        line = string.format([[%s ! parsebin name=pb \
+            pb. ! %s ! decodebin ! videoconvert ! video/x-raw \
+                ! timecodestamper ! %s ! avwait name=wait target-timecode-string="%s" \
+                wait. ! %s \
+                ! %s ! %s name=mux \
             mux. ! %s]],
-            gst_launch(opts), src,
-            vparse, vrate, vscale, vcodec, outmux,
-            sink);
+            filesrc,
+            vparse, vrate, start_tc, vscale, vcodec, outmux,
+            filesink);
         return line
     end
 
     -- audio and video
-    arate = string.format("queue ! %s", arate)
-    vrate = string.format("queue ! %s", vrate)
-    line = string.format([[
-        %s filesrc location=%s ! parsebin name=pb \
-        pb. ! queue ! %s ! queue ! decodebin ! audioconvert ! %s ! avenc_aac ! queue ! %s name=mux \
-        pb. ! queue ! %s ! queue ! decodebin ! %s ! %s ! videoconvert ! %s ! queue ! mux. \
+    -- support start-tc
+    line = string.format([[%s ! parsebin name=pb \
+        pb. ! queue ! %s ! queue ! decodebin ! audioconvert ! audio/x-raw ! %s \
+            ! avwait name=wait target-timecode-string="%s" \
+            ! avenc_aac ! queue ! %s name=mux \
+        pb. ! queue ! %s ! queue ! decodebin ! videoconvert ! video/x-raw \
+            ! timecodestamper ! %s ! wait. \
+            wait. ! queue ! %s  \
+            ! %s ! queue ! mux. \
         mux. ! %s]],
-        gst_launch(opts), src,
-        aparse, arate, outmux,
+        filesrc,
+        aparse, arate, start_tc, outmux,
         vparse, vrate, vscale, vcodec,
-        sink);
+        filesink);
     return line
 end
 
 
 function test_gst(fname, outf, stdout)
-    start = "00:00:00"
-    speed = 1.0
+    start = "00:00:10"
+    speed = 1.5
     width = 1280/2
     height = 720/2
-    fps = 25
-    bps = 500*1000
+    fps = 15
+    bps = 600*1000
     copy = false
 
     local cmd
@@ -231,6 +233,6 @@ function test_gst(fname, outf, stdout)
     print(os.difftime(endtm, begintm))
 end
 
---test_gst("/Users/peter/Downloads/samples/sample-h264.mp4", "/tmp/out_mp4.ts")
-test_gst("/Users/peter/Downloads/samples/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
+test_gst("/Users/peter/Downloads/samples/sample-h264.mp4", "/tmp/out_mp4.ts")
+--test_gst("/Users/peter/Downloads/samples/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
 
