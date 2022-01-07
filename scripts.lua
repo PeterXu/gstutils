@@ -26,45 +26,66 @@ function gst_typefind_demux(src)
     local demux
     local fp = io.popen(string.format("gst-typefind-1.0 %s", src))
     local result = fp:read()
-    if string.find(result, "quicktime") then
-        demux = "qtdemux"
-    elseif string.find(result, "x.matroska") then
-        demux = "matroskademux"
-    elseif string.find(result, "mpegts") then
-        demux = "tsdemux"
+    if result then
+        local format = string.lower(result)
+        if string.find(format, "quicktime") then
+            demux = "qtdemux"
+        elseif string.find(format, "matroska") then
+            demux = "matroskademux"
+        elseif string.find(format, "mpegts") then
+            demux = "tsdemux"
+        elseif string.find(format, "ogg") then
+            demux = "oggdemux"
+        end
     end
     return demux
 end
 
 function gst_format_demux(container)
     local demux
-    if container == "Quicktime" then
+    local format = string.lower(container)
+    if string.find(format, "quicktime") or string.find(format, "3gp") then
         demux = "qtdemux"
-    elseif container == "Matroska" then
+    elseif string.find(format, "matroska") or string.find(format, "webm") then
         demux = "matroskademux"
-    elseif string.find(container, "MPEG.2 Transport Stream") then 
+    elseif string.find(format, "mpeg.2 transport stream") then 
         demux = "tsdemux"
+    elseif string.find(format, "ogg") then
+        demux = "oggdemux"
     end
     return demux
 end
 
-function gst_format_parse(media)
+function gst_audio_parse(media)
     local parse
-    local format = string.upper(media)
-    if string.find(format, "AAC") then
+    local format = string.lower(media)
+    if string.find(format, "aac") then
         parse = "aacparse"
-    elseif string.find(format, "MP3") then
+    elseif string.find(format, "mp3") then
         parse = "mpegaudioparse"
-    elseif string.find(format, "OGM") then
-        parse = "ogmaudioparse"
-    elseif string.find(format, "OPUS") then
+    elseif string.find(format, "vorbis") then
+        parse = "vorbisparse"
+    elseif string.find(format, "opus") then
         parse = "opusparse"
-    elseif string.find(format, "H.264") then
+    elseif string.find(format, "amr") then
+        parse = "amrparse"
+    return parse
+
+function gst_video_parse(media)
+    local parse
+    local format = string.lower(media)
+    if string.find(format, "h.264") then
         parse = "h264parse"
-    elseif string.find(format, "H.265") then
+    elseif string.find(format, "h.265") then
         parse = "h265parse"
-    elseif string.find(format, "MPEG.4") then
+    elseif string.find(format, "mpeg.4 video") then
         parse = "mpeg4videoparse"
+    elseif string.find(format, "theora") then
+        parse = "theoraparse"
+    elseif string.find(format, "H.26n") then
+        parse = "h263parse"
+    elseif string.find(format, "vp8") then
+        parse = nil
     end
     return parse
 end
@@ -80,11 +101,11 @@ function gst_discover(src)
         else
             ret = string.match(info, "audio: (.+)")
             if ret then
-                aparse = gst_format_parse(ret)
+                aparse = gst_audio_parse(ret)
             else
                 ret = string.match(info, "video: (.+)")
                 if ret then
-                    vparse = gst_format_parse(ret)
+                    vparse = gst_video_parse(ret)
                 end
             end
         end
@@ -237,8 +258,8 @@ function test_typefind()
     print(gst_typefind_demux("/tmp/out_mp4.ts"))
 end
 
---test_gst("/tmp/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
 --test_gst("/tmp/sample-h265.mp4", "/tmp/out2_mp4.ts")
+--test_gst("/tmp/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
 --test_gst("/tmp/sample-h264.mp4", "/tmp/out_mp4.ts")
 --test_gst("/tmp/out_mp4.ts", "/tmp/out_ts.ts")
 --test_typefind()
