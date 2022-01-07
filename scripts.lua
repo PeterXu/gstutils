@@ -1,3 +1,18 @@
+function tprint (tbl)
+    local jstr = "{\n"
+    if tbl then 
+        for k, v in pairs(tbl) do
+            if type(v) == "table" then
+                jstr = jstr .. string.format("    %s: ...,\n", tostring(k))
+            else
+                jstr = jstr .. string.format("    %s: %s,\n", tostring(k), tostring(v))
+            end
+        end
+    end
+    jstr = jstr .. "}\n"
+    return jstr
+end
+
 function gst_which(shcmd)
     return os.execute(string.format("which %s >/dev/null", shcmd))
 end
@@ -10,7 +25,18 @@ function gst_inspect(plugin)
     return os.execute(string.format("gst-inspect-1.0 --exists %s", plugin))
 end
 
+function gst_inspect_video_dec(caps, default)
+    local mpp_caps = [[video/x-vp8;video/x-vp9;video/x-h264;video/x-h265;video/mpeg,mpegversion=]]
+    if string.find(mpp_caps, caps, 1, true) then
+        if gst_inspect("mppvideodec") then
+            return "mppvideodec"
+        end
+    end
+    return default
+end
+
 function gst_inspect_video_enc(bps) 
+    -- only use h264
     local codec
     if gst_inspect("mpph264enc") then
         codec = string.format("mpph264enc rc-mode=vbr bps=%d profile=main ! h264parse", bps)
@@ -28,14 +54,16 @@ function gst_typefind_demux(src)
     local result = fp:read()
     if result then
         local format = string.lower(result)
-        if string.find(format, "quicktime") then
+        if string.find(format, "/quicktime", 1, true) then
             demux = "qtdemux"
-        elseif string.find(format, "matroska") then
+        elseif string.find(format, "/x-matroska", 1, true) then
             demux = "matroskademux"
-        elseif string.find(format, "mpegts") then
+        elseif string.find(format, "/mpegts", 1, true) then
             demux = "tsdemux"
-        elseif string.find(format, "ogg") then
+        elseif string.find(format, "/ogg", 1, true) then
             demux = "oggdemux"
+        elseif string.find(format, "/x-flv", 1, true) then
+            demux = "flvdemux"
         end
     end
     return demux
@@ -48,52 +76,61 @@ function gst_format_demux(container)
         demux = "qtdemux"
     elseif string.find(format, "matroska") or string.find(format, "webm") then
         demux = "matroskademux"
-    elseif string.find(format, "mpeg.2 transport stream") then 
+    elseif string.find(format, "mpeg-2 transport stream", 1, true) then 
         demux = "tsdemux"
     elseif string.find(format, "ogg") then
         demux = "oggdemux"
+    elseif string.find(format, "flv") then
+        demux = "flvdemux"
     end
     return demux
 end
 
-function gst_audio_parse(media)
-    local parse
+function gst_audio_info(media)
+    local info
     local format = string.lower(media)
     if string.find(format, "aac") then
-        parse = "aacparse"
+        info = {caps = "audio/mpeg", parse = "aacparse", dec = "avdec_aac"}
     elseif string.find(format, "mp3") then
-        parse = "mpegaudioparse"
+        info = {caps = "audio/mpeg", parse = "mpegaudioparse", dec = "avdec_mp3"}
     elseif string.find(format, "vorbis") then
-        parse = "vorbisparse"
+        info = {caps = "audio/x-vorbis", parse = "vorbisparse", dec = "vorbisdec"}
     elseif string.find(format, "opus") then
-        parse = "opusparse"
+        info = {caps = "audio/x-opus", parse = "opusparse", dec = "avdec_opus"}
     elseif string.find(format, "amr") then
-        parse = "amrparse"
-    return parse
+        info = {caps = nil, parse = "amrparse", dec = nil} --auto: amrnb/amrwb
+    end
+    return info
+end
 
-function gst_video_parse(media)
-    local parse
+function gst_video_info(media)
+    local info
     local format = string.lower(media)
     if string.find(format, "h.264") then
-        parse = "h264parse"
+        info = {caps = "video/x-h264", parse = "h264parse", dec = "avdec_h264"}
     elseif string.find(format, "h.265") then
-        parse = "h265parse"
+        info = {caps = "video/x-h265", parse = "h265parse", dec = "avdec_h265"}
     elseif string.find(format, "mpeg.4 video") then
-        parse = "mpeg4videoparse"
+        info = {caps = "video/mpeg,mpegversion=4", parse = "mpeg4videoparse", dec = "avdec_mpeg4"}
     elseif string.find(format, "theora") then
-        parse = "theoraparse"
-    elseif string.find(format, "H.26n") then
-        parse = "h263parse"
+        info = {caps = "video/x-theora", parse = "theoraparse", dec = "theoradec"}
+    elseif string.find(format, "h.26n") then
+        info = {caps = "video/x-h263", parse = "h263parse", dec = nil} -- auto
     elseif string.find(format, "vp8") then
-        parse = nil
+        info = {caps = "video/x-vp8", parse = nil, dec = "vp8dec"} -- no pb
+    elseif string.find(format, "vp9") then
+        info = {caps = "video/x-vp9", parse = nil, dec = "vp9dec"} -- no pb
     end
-    return parse
+    if info then
+        info.dec = gst_inspect_video_dec(info.caps, info.dec)
+    end
+    return info
 end
 
 function gst_discover(src)
     local line = string.format("gst-discoverer-1.0 %s", src)
     local fp = io.popen(line)
-    local demux, aparse, vparse
+    local demux, ainfo, vinfo
     for info in fp:lines() do
         ret = string.match(info, "container: (.+)")
         if ret then 
@@ -101,30 +138,67 @@ function gst_discover(src)
         else
             ret = string.match(info, "audio: (.+)")
             if ret then
-                aparse = gst_audio_parse(ret)
+                ainfo = gst_audio_info(ret)
             else
                 ret = string.match(info, "video: (.+)")
                 if ret then
-                    vparse = gst_video_parse(ret)
+                    vinfo = gst_video_info(ret)
                 end
             end
         end
     end
-    return demux, aparse, vparse
+    return demux, ainfo, vinfo
 end
 
 function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
-    -- check source format(audio/video)
     local TAG = ">"
-    local demux, aparse, vparse = gst_discover(src)
-    print (TAG, "demux:", demux, "audio:", aparse, "video:", vparse)
-    if demux == nil or (aparse == nil and vparse == nil) then
+
+    -- check media info(audio/video)
+    local demux, ainfo, vinfo = gst_discover(src)
+    print (TAG .. "demux:", demux)
+    print (TAG .. "audio:", tprint(ainfo))
+    print (TAG .. "video:", tprint(vinfo))
+    if demux == nil or (ainfo == nil and vinfo == nil) then
+        return nil
+    else
+        --return nil
+    end
+
+    -- should have one of parse/dec
+    if ainfo and (not ainfo.parse) and (not ainfo.dec) then
         return nil
     end
 
-    -- check video encode
+    -- should have one of parse/dec
+    if vinfo and (not vinfo.parse) and (not vinfo.dec) then
+        return nil
+    end
+
+    local aparse, vparse, adec, vdec
+
+    -- get audio parse/dec
+    if ainfo then
+        aparse = ainfo.parse
+        if ainfo.dec then
+            adec = string.format("queue ! %s ! queue", ainfo.dec)
+        else
+            adec = string.format("queue ! %s ! queue ! decodebin", ainfo.parse) -- auto
+        end
+    end
+
+    -- get video parse/dec
+    if vinfo then
+        vparse = vinfo.parse
+        if vinfo.dec then
+            vdec = string.format("queue ! %s ! queue", vinfo.dec)
+        else
+            vdec = string.format("queue ! %s ! queue ! decodebin", vinfo.parse) -- auto
+        end
+    end
+
+    -- check video enc
     local venc = gst_inspect_video_enc(bps)
-    print (TAG, "video encode:", venc)
+    print (TAG .. "video-enc:", venc, "\n")
     if venc == nil then
         return nil
     end
@@ -133,26 +207,26 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     local opts = ""
 
     -- check output sink
-    local filesink
+    local outsink
     local dst = tonumber(outf)
     if dst == nil then
-        filesink = string.format("filesink location=%s", outf)
+        outsink = string.format("filesink location=%s", outf)
     else
-        filesink = string.format("fdsink fd=%d", dst)
+        outsink = string.format("fdsink fd=%d", dst)
         if dst == 1 then
             opts = "-q"
         end
     end
 
-    local start_tc = string.format([[%s:00]], start)
-    local arate = string.format("speed speed=%f", speed)
-    local vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
-    local vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
-
     -- gst-launch command line
     local line
     local outmux = "mpegtsmux"
     local filesrc = string.format([[%s filesrc location="%s"]], gst_launch(opts), src)
+
+    local start_tc = string.format("%s:00", start)
+    local arate = string.format("speed speed=%f", speed)
+    local vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
+    local vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
 
     -- copy audio/video
     if false or copy then
@@ -164,8 +238,8 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
                 mux. ! queue ! %s]],
                 filesrc, demux,
                 aparse, outmux, vparse,
-                filesink);
-        else
+                outsink);
+        elseif aparse or vparse then
             local tmp_parse = aparse
             if vparse then tmp_parse = vparse end
             line = string.format([[%s ! parsebin name=pb \
@@ -173,56 +247,56 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
                 mux. ! %s]],
                 filesrc,
                 tmp_parse, outmux,
-                filesink);
+                outsink);
+        else
+            print(TAG .. "unsupported: need parse!")
         end
         return line
     end
 
     -- audio-only
-    if false or (aparse and not vparse) then
+    if false or (adec and not vdec) then
         -- unsupport start-tc
         line = string.format([[%s ! parsebin name=pb \
-            pb. ! queue ! %s ! queue ! decodebin ! audioconvert ! audio/x-raw ! %s \
+            pb. ! %s ! audioconvert ! audio/x-raw ! %s \
                 ! avenc_aac ! queue ! %s name=mux \
             mux. ! %s ]],
             filesrc,
-            aparse, arate, outmux,
-            filesink);
+            adec, arate, outmux,
+            outsink);
         return line
     end
 
     -- video-only
-    if false or (not aparse and vparse) then
+    if false or (not adec and vdec) then
         -- support start-tc.
         line = string.format([[%s ! parsebin name=pb \
-            pb. ! %s ! decodebin ! videoconvert ! video/x-raw \
+            pb. ! %s ! videoconvert ! video/x-raw \
                 ! %s ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
                 ! %s \
                 ! %s ! %s name=mux \
             mux. ! %s]],
             filesrc,
-            vparse, vrate, start_tc, vscale, venc, outmux,
-            filesink);
+            vdec, vrate, start_tc, vscale, venc, outmux,
+            outsink);
         return line
     end
 
     -- audio and video
     -- support start-tc
-    aparse = string.format("queue ! %s ! queue", aparse)
-    vparse = string.format("queue ! %s ! queue", vparse)
     line = string.format([[%s ! parsebin name=pb \
-        pb. ! %s ! decodebin ! audioconvert ! queue ! audio/x-raw ! %s \
+        pb. ! %s ! audioconvert ! queue ! audio/x-raw ! %s \
             ! avwait name=wait target-timecode-string="%s" \
             ! avenc_aac ! queue ! %s name=mux \
-        pb. ! %s ! decodebin ! videoconvert ! queue ! video/x-raw ! %s \
+        pb. ! %s ! videoconvert ! queue ! video/x-raw ! %s \
             ! timecodestamper ! wait. \
             wait. ! queue ! %s  \
             ! %s ! queue ! mux. \
         mux. ! %s]],
         filesrc,
-        aparse, arate, start_tc, outmux,
-        vparse, vrate, vscale, venc,
-        filesink);
+        adec, arate, start_tc, outmux,
+        vdec, vrate, vscale, venc,
+        outsink);
     return line
 end
 
@@ -258,8 +332,9 @@ function test_typefind()
     print(gst_typefind_demux("/tmp/out_mp4.ts"))
 end
 
---test_gst("/tmp/sample-h265.mp4", "/tmp/out2_mp4.ts")
---test_gst("/tmp/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
---test_gst("/tmp/sample-h264.mp4", "/tmp/out_mp4.ts")
+--test_gst("/tmp/samples/sample-h265.mp4", "/tmp/out2_mp4.ts")
+--test_gst("/tmp/samples/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
+--test_gst("/tmp/samples/sample-h264.mp4", "/tmp/out_mp4.ts")
+--test_gst("/tmp/samples/small.3gp", "/tmp/out_3gp.ts")
 --test_gst("/tmp/out_mp4.ts", "/tmp/out_ts.ts")
 --test_typefind()
