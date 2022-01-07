@@ -69,7 +69,9 @@ function gst_audio_parse(media)
         parse = "opusparse"
     elseif string.find(format, "amr") then
         parse = "amrparse"
+    end
     return parse
+end
 
 function gst_video_parse(media)
     local parse
@@ -82,7 +84,7 @@ function gst_video_parse(media)
         parse = "mpeg4videoparse"
     elseif string.find(format, "theora") then
         parse = "theoraparse"
-    elseif string.find(format, "H.26n") then
+    elseif string.find(format, "h.26n") then
         parse = "h263parse"
     elseif string.find(format, "vp8") then
         parse = nil
@@ -253,13 +255,13 @@ function test_gst(fname, outf, stdout)
 end
 
 function test_typefind()
-    print(gst_typefind_demux("/tmp/sample-mpeg4.mkv"))
-    print(gst_typefind_demux("/tmp/sample-h264.mp4"))
+    print(gst_typefind_demux("/tmp/samples/sample-mpeg4.mkv"))
+    print(gst_typefind_demux("/tmp/samples/sample-h264.mp4"))
     print(gst_typefind_demux("/tmp/out_mp4.ts"))
 end
 
---test_gst("/tmp/sample-h265.mp4", "/tmp/out2_mp4.ts")
---test_gst("/tmp/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
---test_gst("/tmp/sample-h264.mp4", "/tmp/out_mp4.ts")
+--test_gst("/tmp/samples/sample-h265.mkv", "/tmp/out2_mp4.ts")
+--test_gst("/tmp/samples/sample-mpeg4.mkv", "/tmp/out_mkv.ts")
+--test_gst("/tmp/samples/sample-h264.mp4", "/tmp/out_mp4.ts")
 --test_gst("/tmp/out_mp4.ts", "/tmp/out_ts.ts")
 --test_typefind()
