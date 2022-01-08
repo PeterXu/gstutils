@@ -79,111 +79,119 @@ function gst_inspect_video_enc(bps)
 end
 
 -- check media file's info
-function gst_media_info(src)
+function gst_media_info(caps, props)
     local info
-    local fp = io.popen(string.format("gst-typefind-1.0 %s", src))
-    local result = fp:read()
-    if result then
-        local kind, format = string.match(result, ".*% %-% (%w+)%/([%w%-]+)")
-        local caps = kind .. "/" .. format
+    if caps then
         if findistr(caps, "/quicktime") or
            findistr(caps, "/x-3gp") or
            findistr(caps, "/x-mj2") or
            findistr(caps, "/x-m4a") then
-            info = {caps = caps, demux = "qtdemux"}
+            info = {demux = "qtdemux"}
         elseif findistr(caps, "/x-matroska") or findistr(caps, "/webm") then
-            info = {caps = caps, demux = "matroskademux"}
+            info = {demux = "matroskademux"}
         elseif findistr(caps, "/mpegts") then
-            info = {caps = caps, demux = "tsdemux"}
+            info = {demux = "tsdemux"}
         elseif findistr(caps, "/mpeg") or findistr(caps, "/x-cdxa") then
-            info = {caps = caps, demux = "mpegpsdemux"}
+            info = {demux = "mpegpsdemux"}
         elseif findistr(caps, "/x-msvideo") then
-            info = {caps = caps, demux = "avidemux"}
+            info = {demux = "avidemux"}
         elseif findistr(caps, "/ogg") or findistr(caps, "/kate") then
-            info = {caps = caps, demux = "oggdemux"}
+            info = {demux = "oggdemux"}
         elseif findistr(caps, "/x-flv") then
-            info = {caps = caps, demux = "flvdemux"}
+            info = {demux = "flvdemux"}
+        end
+        if info then
+            info.caps = caps
         end
     end
     return info
 end
 
 -- check audio codec format's info
-function gst_audio_info(format, sampleRate)
+function gst_audio_info(caps, props)
     local info
-    if findistr(format, "MPEG-4 AAC") then
-        info = {caps = "audio/mpeg", parse = "aacparse", dec = "avdec_aac"}
-    elseif findistr(format, "MP2") or findistr(format, "MPEG-1 Layer 2") then
-        info = {caps = "audio/mpeg", parse = "mpegaudioparse", dec = "avdec_mp2float"}
-    elseif findistr(format, "MP3") or findistr(format, "MPEG-1 Layer 3") then
-        info = {caps = "audio/mpeg", parse = "mpegaudioparse", dec = "avdec_mp3"}
-    elseif findistr(format, "Vorbis") then
-        info = {caps = "audio/x-vorbis", parse = "vorbisparse", dec = "vorbisdec"}
-    elseif findistr(format, "Opus") then
-        info = {caps = "audio/x-opus", parse = "opusparse", dec = "avdec_opus"}
-    elseif findistr(format, "FLAC") then
-        info = {caps = "audio/x-flac", parse = "flacparse", dec = "avdec_flac"}
-    elseif findistr(format, "AMR") then
-        -- amrparse does not work
-        if sampleRate == 8000 then
-            info = {caps = "audio/AMR", parse = nil, dec = "avdec_amrnb"} -- 8000
-        else
-            info = {caps = "audio/AMR-WB", parse = nil, dec = "avdec_amrwb"} -- 16000
+    if caps then
+        if findistr(caps, "audio/mpeg") then
+            if findistr(props, "mpegversion=(int)1")
+               and findistr(props, "mpegaudioversion=(int)1") then
+                if findistr(props, "layer=(int)2") then
+                    info = {parse = "mpegaudioparse", dec = "avdec_mp2float"}
+                elseif findistr(props, "layer=(int)3") then
+                    info = {parse = "mpegaudioparse", dec = "avdec_mp3"}
+                end
+            elseif findistr(props, "mpegversion=(int)4") then
+                info = {parse = "aacparse", dec = "avdec_aac"}
+            end
+        elseif findistr(caps, "audio/x-vorbis") then
+            info = {parse = "vorbisparse", dec = "vorbisdec"}
+        elseif findistr(caps, "audio/x-opus") then
+            info = {parse = "opusparse", dec = "avdec_opus"}
+        elseif findistr(caps, "audio/x-flac") then
+            info = {parse = "flacparse", dec = "avdec_flac"}
+        elseif findistr(caps, "audio/AMR-WB") then
+            info = {parse = nil, dec = "avdec_amrwb"} -- 16000
+        elseif findistr(caps, "audio/AMR") then
+            info = {parse = nil, dec = "avdec_amrnb"} -- 8000
+        end
+        if info then
+            info.caps = caps
         end
     end
     return info
 end
 
 -- check video codec format's info
-function gst_video_info(format)
+function gst_video_info(caps, props)
     local info
-    if findistr(format, "H.264") then
-        info = {caps = "video/x-h264", parse = "h264parse", dec = "avdec_h264"}
-    elseif findistr(format, "H.265") then
-        info = {caps = "video/x-h265", parse = "h265parse", dec = "avdec_h265"}
-    elseif findistr(format, "MPEG-1 Video") then
-        info = {caps = "video/mpeg,mpegversion=1", parse = "mpegvideoparse", dec = "avdec_mpegvideo"}
-    elseif findistr(format, "MPEG-2 Video") then
-        info = {caps = "video/mpeg,mpegversion=2", parse = "mpegvideoparse", dec = "avdec_mpeg2video"}
-    elseif findistr(format, "MPEG-4 Video") then
-        info = {caps = "video/mpeg,mpegversion=4", parse = "mpeg4videoparse", dec = "avdec_mpeg4"}
-    elseif findistr(format, "Theora") then
-        info = {caps = "video/x-theora", parse = "theoraparse", dec = "theoradec"}
-    elseif findistr(format, "ITU H.26n") then
-        info = {caps = "video/x-h263", parse = "h263parse", dec = nil} -- auto
-    elseif findistr(format, "VP8") then
-        info = {caps = "video/x-vp8", parse = nil, dec = "vp8dec"} -- no pb
-    elseif findistr(format, "VP9") then
-        info = {caps = "video/x-vp9", parse = nil, dec = "vp9dec"} -- no pb
-    elseif findistr(format, "Sorenson Spark Video") then
-        info = {caps = "video/x-flash-video", parse = nil, dec = "avdec_flv"}
-    end
-    if info then
-        info.dec = gst_inspect_video_dec(info.caps, info.dec)
+    if caps then
+        if findistr(caps, "video/x-h264") then
+            info = {parse = "h264parse", dec = "avdec_h264"}
+        elseif findistr(caps, "video/x-h265") then
+            info = {parse = "h265parse", dec = "avdec_h265"}
+        elseif findistr(caps, "video/mpeg") then
+            if findistr(props, "mpegversion=(int)1") then
+                info = {parse = "mpegvideoparse", dec = "avdec_mpegvideo"}
+            elseif findistr(props, "mpegversion=(int)2") then
+                info = {parse = "mpegvideoparse", dec = "avdec_mpeg2video"}
+            elseif findistr(props, "mpegversion=(int)4") then
+                info = {parse = "mpeg4videoparse", dec = "avdec_mpeg4"}
+            end
+        elseif findistr(caps, "video/x-theora") then
+            info = {parse = "theoraparse", dec = "theoradec"}
+        elseif findistr(caps, "video/x-h263") then
+            info = {parse = "h263parse", dec = nil} -- auto dec
+        elseif findistr(caps, "video/x-vp8") then
+            info = {parse = nil, dec = "vp8dec"} -- no parse
+        elseif findistr(caps, "video/x-vp9") then
+            info = {parse = nil, dec = "vp9dec"} -- no parse
+        elseif findistr(caps, "video/x-flash-video") then
+            info = {parse = nil, dec = "avdec_flv"} -- no parse
+        end
+        if info then
+            info.caps = caps
+            info.dec = gst_inspect_video_dec(info.caps, info.dec)
+        end
     end
     return info
 end
 
 -- discover media file's info
 function gst_discover(src)
-    local container, audio, sampleRate, video
-    local line = string.format("gst-discoverer-1.0 %s", src)
+    local minfo, ainfo, vinfo
+    local line = string.format("gst-discoverer-1.0 -v %s", src)
     local fp = io.popen(line)
     for info in fp:lines() do
-        local ret
-        ret = string.match(info, "container: (.+)")
-        if ret then container = ret end
-        ret = string.match(info, "audio: (.+)")
-        if ret then audio = ret end
-        ret = string.match(info, "Sample rate: (.+)")
-        if ret then sampleRate = ret end
-        ret = string.match(info, "video: (.+)")
-        if ret then video = ret end
+        local ret, props 
+        ret, props = string.match(info, "container: ([%w%-%/]+)[%,]*(.*)")
+        if ret then minfo = gst_media_info(ret, props) end
+
+        ret, props = string.match(info, "audio: ([%w%-%/]+)[%,]*(.*)")
+        if ret then ainfo = gst_audio_info(ret, props) end
+
+        ret, props = string.match(info, "video: ([%w%-%/]+)[%,]*(.*)")
+        if ret then vinfo = gst_video_info(ret, props) end
     end
-    local minfo = gst_media_info(src)
-    if minfo then minfo.name = container end
-    local ainfo = gst_audio_info(audio, tonumber(sampleRate))
-    local vinfo = gst_video_info(video)
+    --print(table2json(minfo), table2json(ainfo), table2json(vinfo))
     return minfo, ainfo, vinfo
 end
 
@@ -367,16 +375,13 @@ function test_gst(fname, outf, stdout)
     print(os.difftime(endtm, begintm))
 end
 
-function test_typefind(flist)
-    for _, item in pairs(flist) do
-        print(item, gst_media_info(item))
-    end
-end
-
 function test_discover(flist)
     for _, item in pairs(flist) do
         local d,a,v = gst_discover(item)
-        print(item, d, table2json(a, true))
+        print(">Media: " .. item, table2json(d, true))
+        print(">Audio:" .. item, table2json(a, true))
+        print(">Video:" .. item, table2json(v, true))
+        print()
     end
 end
 
@@ -388,6 +393,9 @@ function test_files()
         f02 = "/tmp/samples/sample-mpeg4.mkv",
         f03 = "/tmp/samples/sample-h264.mp4",
 
+        f05 = path .. "/samples/small.ogg",
+        f06 = path .. "/samples/small.m4a",
+
         f11 = path .. "/samples/small.mp4",
         f12 = path .. "/samples/small.3gp",
         f13 = path .. "/samples/small.webm",
@@ -395,13 +403,19 @@ function test_files()
         f15 = path .. "/samples/small.flv",
         f16 = path .. "/samples/small.mpg",
         f17 = path .. "/samples/small.avi",
+        f18 = path .. "/samples/small.mkv",
     }
-    --test_typefind({items.f11, items.f12, items.f13, items.f14, items.f15})
-    --test_discover({items.f11, items.f12, items.f13, items.f14, items.f15})
-
-    local fin = items.f17
-    local fout = "/tmp/out_media.ts"
-    test_gst(fin, fout)
+    
+    local dinfo = true
+    if dinfo then
+        test_discover({items.f05, items.f06}) 
+        test_discover({items.f11, items.f12, items.f13, items.f14, items.f15}) 
+        test_discover({items.f16, items.f17, items.f18}) 
+    else
+        local fin = items.f17
+        local fout = "/tmp/out_media.ts"
+        test_gst(fin, fout)
+    end
 end
 
 
