@@ -2,17 +2,17 @@
 -- base tools
 --
 
+function ifone(a, b, c)
+    if a then return b else return c end
+end
+
 function table2json(tbl, short)
-    local newline = "\n"
-    if short then newline = "" end
+    local newline = ifone(short, "", "\n")
     local jstr = "{" .. newline
-    if tbl and type(tbl) == "table" then 
+    if type(tbl) == "table" then 
         for k, v in pairs(tbl) do
-            if type(v) == "table" then
-                jstr = jstr .. string.format("  %s: ...,", tostring(k)) .. newline
-            else
-                jstr = jstr .. string.format("  %s: %s,", tostring(k), tostring(v)) .. newline
-            end
+            local val = ifone(type(v) == "table", "...", tostring(v))
+            jstr = jstr .. string.format("  %s: %s,", tostring(k), val) .. newline
         end
     end
     jstr = jstr .. "}" .. newline
@@ -78,46 +78,34 @@ function gst_inspect_video_enc(bps)
     return codec
 end
 
--- check media file's demux
-function gst_typefind_demux(src)
-    local demux
+-- check media file's info
+function gst_media_info(src)
+    local info
     local fp = io.popen(string.format("gst-typefind-1.0 %s", src))
-    local format = fp:read()
-    if format then
-        if findistr(format, "/quicktime") or findistr(format, "/x-3gp") then
-            demux = "qtdemux"
-        elseif findistr(format, "/x-matroska") or findistr(format, "/webm") then
-            demux = "matroskademux"
-        elseif findistr(format, "/mpegts") then
-            demux = "tsdemux"
-        elseif findistr(format, "/ogg") then
-            demux = "oggdemux"
-        elseif findistr(format, "/x-flv") then
-            demux = "flvdemux"
+    local result = fp:read()
+    if result then
+        local kind, format = string.match(result, ".*% %-% (%w+)%/([%w%-]+)")
+        local caps = kind .. "/" .. format
+        if findistr(caps, "/quicktime") or
+           findistr(caps, "/x-3gp") or
+           findistr(caps, "/x-mj2") or
+           findistr(caps, "/x-m4a") then
+            info = {caps = caps, demux = "qtdemux"}
+        elseif findistr(caps, "/x-matroska") or findistr(caps, "/webm") then
+            info = {caps = caps, demux = "matroskademux"}
+        elseif findistr(caps, "/mpegts") then
+            info = {caps = caps, demux = "tsdemux"}
+        elseif findistr(caps, "/mpeg") or findistr(caps, "/x-cdxa") then
+            info = {caps = caps, demux = "mpegpsdemux"}
+        elseif findistr(caps, "/x-msvideo") then
+            info = {caps = caps, demux = "avidemux"}
+        elseif findistr(caps, "/ogg") or findistr(caps, "/kate") then
+            info = {caps = caps, demux = "oggdemux"}
+        elseif findistr(caps, "/x-flv") then
+            info = {caps = caps, demux = "flvdemux"}
         end
     end
-    return demux
-end
-
--- check container format's demux
-function gst_format_demux(format)
-    local demux
-    if findistr(format, "Quicktime") or findistr(format, "3GP") then
-        demux = "qtdemux"
-    elseif findistr(format, "Matroska") or findistr(format, "WebM") then
-        demux = "matroskademux"
-    elseif findistr(format, "MPEG-2 Transport Stream") then 
-        demux = "tsdemux"
-    elseif findistr(format, "MPEG-1 System Stream") then
-        demux = "mpegpsdemux"
-    elseif findistr(format, "AVI") then
-        demux = "avidemux"
-    elseif findistr(format, "Ogg") then
-        demux = "oggdemux"
-    elseif findistr(format, "Flash") then
-        demux = "flvdemux"
-    end
-    return demux
+    return info
 end
 
 -- check audio codec format's info
@@ -192,10 +180,11 @@ function gst_discover(src)
         ret = string.match(info, "video: (.+)")
         if ret then video = ret end
     end
-    local demux = gst_format_demux(container)
+    local minfo = gst_media_info(src)
+    if minfo then minfo.name = container end
     local ainfo = gst_audio_info(audio, tonumber(sampleRate))
     local vinfo = gst_video_info(video)
-    return demux, ainfo, vinfo
+    return minfo, ainfo, vinfo
 end
 
 -- transcode routine
@@ -203,11 +192,11 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     local TAG = ">"
 
     -- check media info(audio/video)
-    local demux, ainfo, vinfo = gst_discover(src)
-    print (TAG .. "demux:", demux)
+    local minfo, ainfo, vinfo = gst_discover(src)
+    print (TAG .. "media:", table2json(minfo))
     print (TAG .. "audio:", table2json(ainfo))
     print (TAG .. "video:", table2json(vinfo))
-    if demux == nil or (ainfo == nil and vinfo == nil) then
+    if minfo == nil or (ainfo == nil and vinfo == nil) then
         return nil
     else
         --return nil
@@ -223,6 +212,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
         return nil
     end
 
+    local demux = minfo.demux
     local aparse, vparse, adec, vdec
 
     -- get audio parse/dec
@@ -289,8 +279,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
                 aparse, outmux, vparse,
                 outsink);
         elseif aparse or vparse then
-            local tmp_parse = aparse
-            if vparse then tmp_parse = vparse end
+            local tmp_parse = ifone(aparse, aparse, vparse)
             line = string.format([[%s ! parsebin name=pb \
                 pb. ! %s ! queue ! %s name=mux \
                 mux. ! %s]],
@@ -380,7 +369,7 @@ end
 
 function test_typefind(flist)
     for _, item in pairs(flist) do
-        print(item, gst_typefind_demux(item))
+        print(item, gst_media_info(item))
     end
 end
 
