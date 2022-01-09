@@ -51,7 +51,7 @@ function gst_launch(opts)
 end
 
 function gst_inspect(plugin)
-    return os.execute(string.format("gst-inspect-1.0 --exists %s", plugin))
+    return os.execute(string.format("gst-inspect-1.0 %s >/dev/null 2>&1", plugin))
 end
 
 -- check video HW/SW decoder
@@ -336,8 +336,14 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
 
     local start_tc = string.format("%s:00", start)
     local arate = string.format("speed speed=%f", speed)
-    local vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
-    local vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
+    local vrate = string.format("videorate rate=%f ! video/x-raw", speed)
+    if tonumber(fps) > 0 and tonumber(fps) <= 60 then
+        vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
+    end
+    local vscale = string.format("videoscale ! video/x-raw")
+    if tonumber(width) > 0 and tonumber(height) > 0 then
+        vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
+    end
 
     -- copy audio/video
     if false or copy then
@@ -382,10 +388,10 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     if false or (not adec and vdec) then
         -- support start-tc.
         line = string.format([[%s ! parsebin name=pb \
-            pb. ! %s ! videoconvert ! video/x-raw \
-                ! %s ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
-                ! %s \
-                ! %s ! %s name=mux \
+            pb. ! %s ! videoconvert ! queue ! video/x-raw ! %s \
+                ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
+                wait. ! %s \
+                ! %s ! queue ! %s name=mux \
             mux. ! %s]],
             filesrc,
             vdec, vrate, start_tc, vscale, venc, outmux,
@@ -416,7 +422,7 @@ end
 --
 
 function test_gst(fname, outf, stdout)
-    start = "00:00:00"
+    start = "00:00:01"
     speed = 1.0
     width = 1280/2
     height = 720/2
@@ -458,9 +464,9 @@ end
 function test_files()
     local path = script_path()
     local items = {
-        f01 = "/tmp/samples/sample-h265.mkv",
-        f02 = "/tmp/samples/sample-mpeg4.mkv",
-        f03 = "/tmp/samples/sample-h264.mp4",
+        f01 = "/tmp/sample-h265.mkv",
+        f02 = "/tmp/sample-mpeg4.mkv",
+        f03 = "/tmp/sample-h264.mp4",
 
         f05 = path .. "/samples/small.ogg",
         f06 = path .. "/samples/small.m4a",
