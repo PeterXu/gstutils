@@ -483,13 +483,13 @@ function test_files()
         f19 = path .. "/samples/small.asf",
     }
     
-    local dinfo = true
+    local dinfo = false
     if dinfo then
         test_discover({items.f05, items.f06, items.f07}) 
         test_discover({items.f11, items.f12, items.f13, items.f14, items.f15}) 
         test_discover({items.f16, items.f17, items.f18, items.f19}) 
     else
-        local fin = items.f19
+        local fin = items.f03
         local fout = "/tmp/out_media.ts"
         test_gst(fin, fout)
     end
