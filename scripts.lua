@@ -79,13 +79,14 @@ function gst_inspect_video_enc(bps)
 end
 
 -- check media file's info
+-- supported media files: mp4(mov,3gp,m4a)/mkv(webm)/mpeg(ps,ts)/avi/ogg/flv/id3(mp3)/asf(wmv)
 function gst_media_info(caps, props)
     local info
     if caps then
-        if findistr(caps, "/quicktime") or
-           findistr(caps, "/x-3gp") or
-           findistr(caps, "/x-mj2") or
-           findistr(caps, "/x-m4a") then
+        if findistr(caps, "/quicktime")
+            or findistr(caps, "/x-3gp")
+            or findistr(caps, "/x-mj2")
+            or findistr(caps, "/x-m4a") then
             info = {demux = "qtdemux"}
         elseif findistr(caps, "/x-matroska") or findistr(caps, "/webm") then
             info = {demux = "matroskademux"}
@@ -99,6 +100,10 @@ function gst_media_info(caps, props)
             info = {demux = "oggdemux"}
         elseif findistr(caps, "/x-flv") then
             info = {demux = "flvdemux"}
+        elseif findistr(caps, "/x-id3") then
+            info = {demux = "id3demux"}
+        elseif findistr(caps, "/x-ms-asf") then
+            info = {demux = "asfdemux"}
         end
         if info then
             info.caps = caps
@@ -108,18 +113,22 @@ function gst_media_info(caps, props)
 end
 
 -- check audio codec format's info
+-- supported audio: mpeg(mp1,mp2,mp3,aac)/vorbis/opus/flac/amr(nb,wb)/speex/alaw(ulaw)/ac3/wma
 function gst_audio_info(caps, props)
     local info
     if caps then
         if findistr(caps, "audio/mpeg") then
-            if findistr(props, "mpegversion=(int)1")
-               and findistr(props, "mpegaudioversion=(int)1") then
-                if findistr(props, "layer=(int)2") then
+            -- findistr(props, "mpegaudioversion=(int)1")
+            if findistr(props, "mpegversion=(int)1") then
+                if findistr(props, "layer=(int)1") then
+                    info = {parse = "mpegaudioparse", dec = "avdec_mp1float"}
+                elseif findistr(props, "layer=(int)2") then
                     info = {parse = "mpegaudioparse", dec = "avdec_mp2float"}
                 elseif findistr(props, "layer=(int)3") then
                     info = {parse = "mpegaudioparse", dec = "avdec_mp3"}
                 end
-            elseif findistr(props, "mpegversion=(int)4") then
+            elseif findistr(props, "mpegversion=(int)2") 
+                or findistr(props, "mpegversion=(int)4") then
                 info = {parse = "aacparse", dec = "avdec_aac"}
             end
         elseif findistr(caps, "audio/x-vorbis") then
@@ -132,6 +141,28 @@ function gst_audio_info(caps, props)
             info = {parse = nil, dec = "avdec_amrwb"} -- 16000
         elseif findistr(caps, "audio/AMR") then
             info = {parse = nil, dec = "avdec_amrnb"} -- 8000
+        elseif findistr(caps, "audio/x-speex") then
+            info = {parse = nil, dec = "speexdec"}
+        elseif findistr(caps, "audio/x-alaw") then
+            info = {parse = "audioparse", dec = "alawdec"}
+        elseif findistr(caps, "audio/x-mulaw") then
+            info = {parse = "audioparse", dec = "mulawdec"}
+        elseif findistr(caps, "audio/x-ac3")
+            or findistr(caps, "audio/ac3")
+            or findistr(caps, "audio/x-private1-ac3") then
+            info = {parse = "ac3parse", dec = "avdec_ac3"}
+        elseif findistr(caps, "audio/x-eac3") then
+            info = {parse = "ac3parse", dec = "avdec_eac3"}
+        elseif findistr(caps, "audio/x-wma") then
+            if findistr(props, "wmaversion=(int)1") then
+                info = {parse = nil, dec = "avdec_wmav1"}
+            elseif findistr(props, "wmaversion=(int)2") then
+                info = {parse = nil, dec = "avdec_wmav2"}
+            elseif findistr(props, "wmaversion=(int)3") then
+                info = {parse = nil, dec = "avdec_wmapro"}
+            elseif findistr(props, "wmaversion=(int)4") then
+                info = {parse = nil, dec = "avdec_wmalossless"}
+            end
         end
         if info then
             info.caps = caps
@@ -141,6 +172,7 @@ function gst_audio_info(caps, props)
 end
 
 -- check video codec format's info
+-- supported video: h263/h264/h265/mpeg(mpeg1,mpge2,mpge4,divx,msmpeg4)/vp8(vp9)/theora/flash/wmv
 function gst_video_info(caps, props)
     local info
     if caps then
@@ -156,20 +188,47 @@ function gst_video_info(caps, props)
             elseif findistr(props, "mpegversion=(int)4") then
                 info = {parse = "mpeg4videoparse", dec = "avdec_mpeg4"}
             end
-        elseif findistr(caps, "video/x-theora") then
-            info = {parse = "theoraparse", dec = "theoradec"}
         elseif findistr(caps, "video/x-h263") then
             info = {parse = "h263parse", dec = nil} -- auto dec
         elseif findistr(caps, "video/x-vp8") then
             info = {parse = nil, dec = "vp8dec"} -- no parse
         elseif findistr(caps, "video/x-vp9") then
             info = {parse = nil, dec = "vp9dec"} -- no parse
+        elseif findistr(caps, "video/x-theora") then
+            info = {parse = "theoraparse", dec = "theoradec"}
         elseif findistr(caps, "video/x-flash-video") then
             info = {parse = nil, dec = "avdec_flv"} -- no parse
+        elseif findistr(caps, "video/x-divx") then
+            if findistr(props, "divxversion=(int)3") then
+                info = {parse = nil, dec = "avdec_msmpeg4"}
+            elseif findistr(props, "divxversion=(int)4")
+                or findistr(props, "divxversion=(int)5") then
+                info = {parse = "mpeg4videoparse", dec = "avdec_mpeg4"}
+            end
+        elseif findistr(caps, "video/x-msmpeg") then
+            if findistr(props, "msmpegversion=(int)41") then
+                info = {parse = nil, dec = "avdec_msmpeg4v1"}
+            elseif findistr(props, "msmpegversion=(int)42") then
+                info = {parse = nil, dec = "avdec_msmpeg4v2"}
+            elseif findistr(props, "msmpegversion=(int)43") then
+                info = {parse = nil, dec = "avdec_msmpeg4"}
+            end
+        elseif findistr(caps, "video/x-wmv") then
+            if findistr(props, "wmvversion=(int)1") then
+                info = {parse = nil, dec = "avdec_wmv1"}
+            elseif findistr(props, "wmvversion=(int)2") then
+                info = {parse = nil, dec = "avdec_wmv2"}
+            elseif findistr(props, "wmvversion=(int)3") then
+                if findistr(props, "format=WMV3") then
+                    info = {parse = nil, dec = "avdec_wmv3"}
+                else
+                    info = {parse = "vc1parse", dec = "avdec_vc1"} -- WVC1/WMVA
+                end
+            end
         end
         if info then
             info.caps = caps
-            info.dec = gst_inspect_video_dec(info.caps, info.dec)
+            info.dec = gst_inspect_video_dec(caps, info.dec)
         end
     end
     return info
@@ -184,6 +243,10 @@ function gst_discover(src)
         local ret, props 
         ret, props = string.match(info, "container: ([%w%-%/]+)[%,]*(.*)")
         if ret then minfo = gst_media_info(ret, props) end
+        if not minfo then
+            ret, props = string.match(info, "unknown: ([%w%-%/]+)[%,]*(.*)")
+            if ret then minfo = gst_media_info(ret, props) end
+        end
 
         ret, props = string.match(info, "audio: ([%w%-%/]+)[%,]*(.*)")
         if ret then ainfo = gst_audio_info(ret, props) end
@@ -268,6 +331,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     -- gst-launch command line
     local line
     local outmux = "mpegtsmux"
+    local mime = "video/mpegts"
     local filesrc = string.format([[%s filesrc location="%s"]], gst_launch(opts), src)
 
     local start_tc = string.format("%s:00", start)
@@ -277,8 +341,9 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
 
     -- copy audio/video
     if false or copy then
-        if demux == "matroskademux" then outmux = "matroskamux" end
         if false or (aparse and vparse) then
+            if demux == "matroskademux" then outmux = "matroskamux" end
+            mime = minfo.caps
             line = string.format([[%s ! %s name=demux \
                 demux.audio_0 ! queue ! %s ! %s name=mux \
                 demux.video_0 ! queue ! %s ! mux. \
@@ -297,7 +362,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
         else
             print(TAG .. "unsupported: need codec-parse!")
         end
-        return line
+        return line, mime
     end
 
     -- audio-only
@@ -310,7 +375,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
             filesrc,
             adec, arate, outmux,
             outsink);
-        return line
+        return line, mime
     end
 
     -- video-only
@@ -325,7 +390,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
             filesrc,
             vdec, vrate, start_tc, vscale, venc, outmux,
             outsink);
-        return line
+        return line, mime
     end
 
     -- audio and video
@@ -343,7 +408,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
         adec, arate, start_tc, outmux,
         vdec, vrate, vscale, venc,
         outsink);
-    return line
+    return line, mime
 end
 
 --
@@ -359,20 +424,24 @@ function test_gst(fname, outf, stdout)
     bps = 600*1000
     copy = false
 
-    local cmd
+    local cmd, mime
     if stdout then
-        cmd = gst_transcode(fname, copy, start, speed, width, height, fps, bps, 1)
-        cmd = string.format("%s >%s", cmd, outf)
+        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, 1)
+        if cmd then
+            cmd = string.format("%s >%s", cmd, outf)
+        end
     else
-        cmd = gst_transcode(fname, copy, start, speed, width, height, fps, bps, outf)
+        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, outf)
     end
 
-    print("============", fname, "===========")
-    print(cmd)
-    local begintm = os.time();
-    os.execute(cmd)
-    local endtm = os.time();
-    print(os.difftime(endtm, begintm))
+    print("============", fname, "===========", mime)
+    if cmd then
+        print(cmd)
+        local begintm = os.time();
+        os.execute(cmd)
+        local endtm = os.time();
+        print(os.difftime(endtm, begintm))
+    end
 end
 
 function test_discover(flist)
@@ -395,6 +464,7 @@ function test_files()
 
         f05 = path .. "/samples/small.ogg",
         f06 = path .. "/samples/small.m4a",
+        f07 = path .. "/samples/small.mp3",
 
         f11 = path .. "/samples/small.mp4",
         f12 = path .. "/samples/small.3gp",
@@ -404,15 +474,16 @@ function test_files()
         f16 = path .. "/samples/small.mpg",
         f17 = path .. "/samples/small.avi",
         f18 = path .. "/samples/small.mkv",
+        f19 = path .. "/samples/small.asf",
     }
     
     local dinfo = true
     if dinfo then
-        test_discover({items.f05, items.f06}) 
+        test_discover({items.f05, items.f06, items.f07}) 
         test_discover({items.f11, items.f12, items.f13, items.f14, items.f15}) 
-        test_discover({items.f16, items.f17, items.f18}) 
+        test_discover({items.f16, items.f17, items.f18, items.f19}) 
     else
-        local fin = items.f17
+        local fin = items.f19
         local fout = "/tmp/out_media.ts"
         test_gst(fin, fout)
     end
