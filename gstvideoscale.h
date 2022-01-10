@@ -26,9 +26,9 @@
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_VIDEO_SCALE (gst_video_scale_get_type())
+#define GST_TYPE_VIDEO_SCALE (gst_video_scale2_get_type())
 #define GST_VIDEO_SCALE_CAST(obj) ((GstVideoScale *)(obj))
-G_DECLARE_FINAL_TYPE (GstVideoScale, gst_video_scale, GST, VIDEO_SCALE,
+G_DECLARE_FINAL_TYPE (GstVideoScale, gst_video_scale2, GST, VIDEO_SCALE,
     GstVideoFilter)
 
 
@@ -45,7 +45,7 @@ G_DECLARE_FINAL_TYPE (GstVideoScale, gst_video_scale, GST, VIDEO_SCALE,
  * @GST_VIDEO_SCALE_CATROM: use a multitap bicubic Catmull-Rom filter
  * @GST_VIDEO_SCALE_MITCHELL: use a multitap bicubic Mitchell filter
  *
- * The videoscale method to use.
+ * The videoscale2 method to use.
  */
 typedef enum {
   GST_VIDEO_SCALE_NEAREST,
