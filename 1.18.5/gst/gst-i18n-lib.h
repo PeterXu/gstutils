@@ -1,7 +1,7 @@
 /* GStreamer
  * Copyright (C) 2004 Thomas Vander Stichele <thomas@apestaart.org>
  *
- * gst-i18n-app.h: internationalization macros for the GStreamer tools
+ * gst-i18n-lib.h: internationalization macros for the GStreamer libraries
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -20,8 +20,14 @@
  */
 
 
-#ifndef __GST_I18N_APP_H__
-#define __GST_I18N_APP_H__
+#ifndef __GST_I18N_LIB_H__
+#define __GST_I18N_LIB_H__
+
+#include "config2.h"
+
+#ifndef PACKAGE_NAME
+#error You must include config.h before including this header.
+#endif
 
 #ifdef ENABLE_NLS
 
@@ -29,16 +35,15 @@
 #include "gettext.h" /* included with gettext distribution and copied */
 
 /* we want to use shorthand _() for translating and N_() for marking */
-#define _(String) gettext (String)
+#define _(String) dgettext (GETTEXT_PACKAGE, String)
 #define N_(String) gettext_noop (String)
 /* FIXME: if we need it, we can add Q_ as well, like in glib */
 
 #else
-
 #define _(String) String
 #define N_(String) String
 #define ngettext(Singular,Plural,Count) ((Count>1)?Plural:Singular)
 
 #endif
 
-#endif /* __GST_I18N_APP_H__ */
+#endif /* __GST_I18N_LIB_H__ */

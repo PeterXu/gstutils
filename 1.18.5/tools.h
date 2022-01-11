@@ -26,13 +26,7 @@
 #include <stdlib.h>
 
 #include <gst/gst.h>
-#include "gst-i18n-app.h"
-
-#ifndef GST_PACKAGE_ORIGIN
-#define GST_PACKAGE_ORIGIN "https://developer.gnome.org/gstreamer/"
-#define GST_API_VERSION "1.0"
-#define GETTEXT_PACKAGE "cn"
-#endif // GST_PACKAGE_ORIGIN
+#include "gst/gst-i18n-app.h"
 
 /*
  * This is a kind of hacky way to make all the tools use the same version code.

@@ -182,8 +182,8 @@ enum
 } G_STMT_END
 
 #define _do_init \
-    GST_DEBUG_CATEGORY_INIT (queue_debug, "queue3", 0, "queue element"); \
-    GST_DEBUG_CATEGORY_INIT (queue_dataflow, "queue3_dataflow", 0, \
+    GST_DEBUG_CATEGORY_INIT (queue_debug, "queue", 0, "queue element"); \
+    GST_DEBUG_CATEGORY_INIT (queue_dataflow, "queue_dataflow", 0, \
         "dataflow inside the queue element");
 #define gst_queue_parent_class parent_class
 G_DEFINE_TYPE_WITH_CODE (GstQueue, gst_queue, GST_TYPE_ELEMENT, _do_init);
