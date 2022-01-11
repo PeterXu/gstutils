@@ -17,8 +17,8 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#ifndef __GST_VIDEO_SCALE_H__
-#define __GST_VIDEO_SCALE_H__
+#ifndef __GST_VIDEO_SCALE2_H__
+#define __GST_VIDEO_SCALE2_H__
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
@@ -26,51 +26,51 @@
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_VIDEO_SCALE (gst_video_scale2_get_type())
-#define GST_VIDEO_SCALE_CAST(obj) ((GstVideoScale *)(obj))
-G_DECLARE_FINAL_TYPE (GstVideoScale, gst_video_scale2, GST, VIDEO_SCALE,
+#define GST_TYPE_VIDEO_SCALE2 (gst_video_scale2_get_type())
+#define GST_VIDEO_SCALE2_CAST(obj) ((GstVideoScale2 *)(obj))
+G_DECLARE_FINAL_TYPE (GstVideoScale2, gst_video_scale2, GST, VIDEO_SCALE2,
     GstVideoFilter)
 
 
 /**
- * GstVideoScaleMethod:
- * @GST_VIDEO_SCALE_NEAREST: use nearest neighbour scaling (fast and ugly)
- * @GST_VIDEO_SCALE_BILINEAR: use 2-tap bilinear scaling (slower but prettier).
- * @GST_VIDEO_SCALE_4TAP: use a 4-tap sinc filter for scaling (slow).
- * @GST_VIDEO_SCALE_LANCZOS: use a multitap Lanczos filter for scaling (slow).
- * @GST_VIDEO_SCALE_BILINEAR2: use a multitap bilinear filter
- * @GST_VIDEO_SCALE_SINC: use a multitap sinc filter
- * @GST_VIDEO_SCALE_HERMITE: use a multitap bicubic Hermite filter
- * @GST_VIDEO_SCALE_SPLINE: use a multitap bicubic spline filter
- * @GST_VIDEO_SCALE_CATROM: use a multitap bicubic Catmull-Rom filter
- * @GST_VIDEO_SCALE_MITCHELL: use a multitap bicubic Mitchell filter
+ * GstVideoScale2Method:
+ * @GST_VIDEO_SCALE2_NEAREST: use nearest neighbour scaling (fast and ugly)
+ * @GST_VIDEO_SCALE2_BILINEAR: use 2-tap bilinear scaling (slower but prettier).
+ * @GST_VIDEO_SCALE2_4TAP: use a 4-tap sinc filter for scaling (slow).
+ * @GST_VIDEO_SCALE2_LANCZOS: use a multitap Lanczos filter for scaling (slow).
+ * @GST_VIDEO_SCALE2_BILINEAR2: use a multitap bilinear filter
+ * @GST_VIDEO_SCALE2_SINC: use a multitap sinc filter
+ * @GST_VIDEO_SCALE2_HERMITE: use a multitap bicubic Hermite filter
+ * @GST_VIDEO_SCALE2_SPLINE: use a multitap bicubic spline filter
+ * @GST_VIDEO_SCALE2_CATROM: use a multitap bicubic Catmull-Rom filter
+ * @GST_VIDEO_SCALE2_MITCHELL: use a multitap bicubic Mitchell filter
  *
  * The videoscale2 method to use.
  */
 typedef enum {
-  GST_VIDEO_SCALE_NEAREST,
-  GST_VIDEO_SCALE_BILINEAR,
-  GST_VIDEO_SCALE_4TAP,
-  GST_VIDEO_SCALE_LANCZOS,
+  GST_VIDEO_SCALE2_NEAREST,
+  GST_VIDEO_SCALE2_BILINEAR,
+  GST_VIDEO_SCALE2_4TAP,
+  GST_VIDEO_SCALE2_LANCZOS,
 
-  GST_VIDEO_SCALE_BILINEAR2,
-  GST_VIDEO_SCALE_SINC,
-  GST_VIDEO_SCALE_HERMITE,
-  GST_VIDEO_SCALE_SPLINE,
-  GST_VIDEO_SCALE_CATROM,
-  GST_VIDEO_SCALE_MITCHELL
-} GstVideoScaleMethod;
+  GST_VIDEO_SCALE2_BILINEAR2,
+  GST_VIDEO_SCALE2_SINC,
+  GST_VIDEO_SCALE2_HERMITE,
+  GST_VIDEO_SCALE2_SPLINE,
+  GST_VIDEO_SCALE2_CATROM,
+  GST_VIDEO_SCALE2_MITCHELL
+} GstVideoScale2Method;
 
 /**
- * GstVideoScale:
+ * GstVideoScale2:
  *
  * Opaque data structure
  */
-struct _GstVideoScale {
+struct _GstVideoScale2 {
   GstVideoFilter element;
 
   /* properties */
-  GstVideoScaleMethod method;
+  GstVideoScale2Method method;
   gboolean add_borders;
   double sharpness;
   double sharpen;
@@ -88,4 +88,4 @@ struct _GstVideoScale {
 
 G_END_DECLS
 
-#endif /* __GST_VIDEO_SCALE_H__ */
+#endif /* __GST_VIDEO_SCALE2_H__ */
