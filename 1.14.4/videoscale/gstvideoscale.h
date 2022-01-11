@@ -17,8 +17,8 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#ifndef __GST_VIDEO_SCALE_H__
-#define __GST_VIDEO_SCALE_H__
+#ifndef __GST_VIDEO_SCALE2_H__
+#define __GST_VIDEO_SCALE2_H__
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
@@ -26,61 +26,61 @@
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_VIDEO_SCALE \
-  (gst_video_scale_get_type())
-#define GST_VIDEO_SCALE(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_VIDEO_SCALE,GstVideoScale))
-#define GST_VIDEO_SCALE_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_VIDEO_SCALE,GstVideoScaleClass))
-#define GST_IS_VIDEO_SCALE(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_VIDEO_SCALE))
-#define GST_IS_VIDEO_SCALE_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_VIDEO_SCALE))
-#define GST_VIDEO_SCALE_CAST(obj)       ((GstVideoScale *)(obj))
+#define GST_TYPE_VIDEO_SCALE2 \
+  (gst_video_scale2_get_type())
+#define GST_VIDEO_SCALE2(obj) \
+  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_VIDEO_SCALE2,GstVideoScale2))
+#define GST_VIDEO_SCALE2_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_VIDEO_SCALE2,GstVideoScale2Class))
+#define GST_IS_VIDEO_SCALE2(obj) \
+  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_VIDEO_SCALE2))
+#define GST_IS_VIDEO_SCALE2_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_VIDEO_SCALE2))
+#define GST_VIDEO_SCALE2_CAST(obj)       ((GstVideoScale2 *)(obj))
 
 
 /**
- * GstVideoScaleMethod:
- * @GST_VIDEO_SCALE_NEAREST: use nearest neighbour scaling (fast and ugly)
- * @GST_VIDEO_SCALE_BILINEAR: use 2-tap bilinear scaling (slower but prettier).
- * @GST_VIDEO_SCALE_4TAP: use a 4-tap sinc filter for scaling (slow).
- * @GST_VIDEO_SCALE_LANCZOS: use a multitap Lanczos filter for scaling (slow).
- * @GST_VIDEO_SCALE_BILINEAR2: use a multitap bilinear filter
- * @GST_VIDEO_SCALE_SINC: use a multitap sinc filter
- * @GST_VIDEO_SCALE_HERMITE: use a multitap bicubic Hermite filter
- * @GST_VIDEO_SCALE_SPLINE: use a multitap bicubic spline filter
- * @GST_VIDEO_SCALE_CATROM: use a multitap bicubic Catmull-Rom filter
- * @GST_VIDEO_SCALE_MITCHELL: use a multitap bicubic Mitchell filter
+ * GstVideoScale2Method:
+ * @GST_VIDEO_SCALE2_NEAREST: use nearest neighbour scaling (fast and ugly)
+ * @GST_VIDEO_SCALE2_BILINEAR: use 2-tap bilinear scaling (slower but prettier).
+ * @GST_VIDEO_SCALE2_4TAP: use a 4-tap sinc filter for scaling (slow).
+ * @GST_VIDEO_SCALE2_LANCZOS: use a multitap Lanczos filter for scaling (slow).
+ * @GST_VIDEO_SCALE2_BILINEAR2: use a multitap bilinear filter
+ * @GST_VIDEO_SCALE2_SINC: use a multitap sinc filter
+ * @GST_VIDEO_SCALE2_HERMITE: use a multitap bicubic Hermite filter
+ * @GST_VIDEO_SCALE2_SPLINE: use a multitap bicubic spline filter
+ * @GST_VIDEO_SCALE2_CATROM: use a multitap bicubic Catmull-Rom filter
+ * @GST_VIDEO_SCALE2_MITCHELL: use a multitap bicubic Mitchell filter
  *
- * The videoscale method to use.
+ * The videoscale2 method to use.
  */
 typedef enum {
-  GST_VIDEO_SCALE_NEAREST,
-  GST_VIDEO_SCALE_BILINEAR,
-  GST_VIDEO_SCALE_4TAP,
-  GST_VIDEO_SCALE_LANCZOS,
+  GST_VIDEO_SCALE2_NEAREST,
+  GST_VIDEO_SCALE2_BILINEAR,
+  GST_VIDEO_SCALE2_4TAP,
+  GST_VIDEO_SCALE2_LANCZOS,
 
-  GST_VIDEO_SCALE_BILINEAR2,
-  GST_VIDEO_SCALE_SINC,
-  GST_VIDEO_SCALE_HERMITE,
-  GST_VIDEO_SCALE_SPLINE,
-  GST_VIDEO_SCALE_CATROM,
-  GST_VIDEO_SCALE_MITCHELL
-} GstVideoScaleMethod;
+  GST_VIDEO_SCALE2_BILINEAR2,
+  GST_VIDEO_SCALE2_SINC,
+  GST_VIDEO_SCALE2_HERMITE,
+  GST_VIDEO_SCALE2_SPLINE,
+  GST_VIDEO_SCALE2_CATROM,
+  GST_VIDEO_SCALE2_MITCHELL
+} GstVideoScale2Method;
 
-typedef struct _GstVideoScale GstVideoScale;
-typedef struct _GstVideoScaleClass GstVideoScaleClass;
+typedef struct _GstVideoScale2 GstVideoScale2;
+typedef struct _GstVideoScale2Class GstVideoScale2Class;
 
 /**
- * GstVideoScale:
+ * GstVideoScale2:
  *
  * Opaque data structure
  */
-struct _GstVideoScale {
+struct _GstVideoScale2 {
   GstVideoFilter element;
 
   /* properties */
-  GstVideoScaleMethod method;
+  GstVideoScale2Method method;
   gboolean add_borders;
   double sharpness;
   double sharpen;
@@ -96,12 +96,12 @@ struct _GstVideoScale {
   gint borders_w;
 };
 
-struct _GstVideoScaleClass {
+struct _GstVideoScale2Class {
   GstVideoFilterClass parent_class;
 };
 
-G_GNUC_INTERNAL GType gst_video_scale_get_type (void);
+G_GNUC_INTERNAL GType gst_video_scale2_get_type (void);
 
 G_END_DECLS
 
-#endif /* __GST_VIDEO_SCALE_H__ */
+#endif /* __GST_VIDEO_SCALE2_H__ */
