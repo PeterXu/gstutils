@@ -2,3 +2,4 @@ gst-launch
 *.o
 *.dylib
 *.so
+*.bin
