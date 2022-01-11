@@ -69,6 +69,8 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#else
+#include "config2.h"
 #endif
 
 #include <string.h>
