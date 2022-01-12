@@ -1,0 +1,189 @@
+From 268ff97e0300bb2a8ad04f70dfbc7ac2081a6b6c Mon Sep 17 00:00:00 2001
+From: Peter <peter@uskee.org>
+Date: Wed, 12 Jan 2022 10:06:24 +0800
+Subject: [PATCH 2/2] refine transcode
+
+---
+ action/ffmpeg.lua    |  2 +-
+ action/gstreamer.lua | 26 ++++++++++++++++----------
+ action/media.lua     | 41 ++++++++++++++++++++++++++---------------
+ 3 files changed, 43 insertions(+), 26 deletions(-)
+
+diff --git a/action/ffmpeg.lua b/action/ffmpeg.lua
+index e42c7a7..8d8b1fe 100644
+--- a/action/ffmpeg.lua
++++ b/action/ffmpeg.lua
+@@ -1,5 +1,5 @@
+ -- ffmpeg transcode
+-function ff_transcode(src, start, speed, bCopy, height, frameRate, vbitrate, abitrate)
++function ff_transcode(src, bCopy, start, speed, height, frameRate, vbitrate, abitrate)
+     local cmdMid -- [[/usr/bin/ffmpeg -y %s -i '%s']] [[-vcodec copy -acodec copy]] [[-f mpeg pipe:1]]
+     local fullPath = src
+     local ss = string.format("-ss %s", start)
+diff --git a/action/gstreamer.lua b/action/gstreamer.lua
+index 4f94868..dedacdf 100644
+--- a/action/gstreamer.lua
++++ b/action/gstreamer.lua
+@@ -2,6 +2,10 @@
+ -- base tools
+ --
+ 
++function shexecute(cmd)
++    return os.execute(cmd)
++end
++
+ function ifone(a, b, c)
+     if a then return b else return c end
+ end
+@@ -39,7 +43,7 @@ function script_path()
+ end
+ 
+ function sh_which(cmd)
+-    return os.execute(string.format("which %s >/dev/null", cmd))
++    return shexecute(string.format("which %s >/dev/null", cmd))
+ end
+ 
+ --
+@@ -51,7 +55,7 @@ function gst_launch(opts)
+ end
+ 
+ function gst_inspect(plugin)
+-    return os.execute(string.format("gst-inspect-1.0 %s >/dev/null 2>&1", plugin))
++    return shexecute(string.format("gst-inspect-1.0 %s >/dev/null 2>&1", plugin))
+ end
+ 
+ -- check video HW/SW decoder
+@@ -66,8 +70,9 @@ function gst_inspect_video_dec(caps, default)
+ end
+ 
+ -- check video HW/SW encoder(only use h264)
+-function gst_inspect_video_enc(bps) 
++function gst_inspect_video_enc(kbps) 
+     local codec
++    local bps = tonumber(kbps) * 1024
+     if gst_inspect("mpph264enc") then
+         codec = string.format("mpph264enc rc-mode=vbr bps=%d profile=main ! h264parse", bps)
+     elseif gst_inspect("avenc_h264") then
+@@ -259,7 +264,7 @@ function gst_discover(src)
+ end
+ 
+ -- transcode routine
+-function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
++function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kbps, outf)
+     local TAG = ">"
+ 
+     -- check media info(audio/video)
+@@ -307,7 +312,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
+     end
+ 
+     -- check video enc
+-    local venc = gst_inspect_video_enc(bps)
++    local venc = gst_inspect_video_enc(v_kbps)
+     print (TAG .. "video-enc:", venc, "\n")
+     if venc == nil then
+         return nil
+@@ -427,24 +432,25 @@ function test_gst(fname, outf, stdout)
+     width = 1280/2
+     height = 720/2
+     fps = 15
+-    bps = 600*1000
++    vkbps = 600 -- video
++    akbps = 64 -- audio
+     copy = false
+ 
+     local cmd, mime
+     if stdout then
+-        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, 1)
++        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, 1)
+         if cmd then
+             cmd = string.format("%s >%s", cmd, outf)
+         end
+     else
+-        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, outf)
++        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, outf)
+     end
+ 
+     print("============", fname, "===========", mime)
+     if cmd then
+         print(cmd)
+         local begintm = os.time();
+-        os.execute(cmd)
++        shexecute(cmd)
+         local endtm = os.time();
+         print(os.difftime(endtm, begintm))
+     end
+@@ -496,4 +502,4 @@ function test_files()
+ end
+ 
+ 
+-test_files()
++--test_files()
+diff --git a/action/media.lua b/action/media.lua
+index 02e144d..10ca91e 100644
+--- a/action/media.lua
++++ b/action/media.lua
+@@ -38,35 +38,46 @@ function playMedia(req, res, next)
+     if speed < 0.5 or speed > 2.0 then speed = 1.0; end;
+ 
+         --获取framerate
+-    local flag, data = dnShell.execute(string.format("/usr/bin/exiftool -json -n -FrameRate -ImageHeight -FileSize -Duration '%s'", fullPath))
++    local flag, data = dnShell.execute(string.format("/usr/bin/exiftool -json -n -FrameRate -ImageHeight -ImageWidth -FileSize -Duration '%s'", fullPath))
+     if flag == -1 or #data<10 then resErrReturn(503, req.tr.MSG_INTERNAL_ERR, data); return; end;
+     local objs=cjson.decode(data)
+     if objs==nil or #objs==0 then resErrReturn(503, req.tr.MSG_INTERNAL_ERR, data); return; end;
+     local o = objs[1]
+-    local frameRate, mih, mab =o.FrameRate * speed, o.ImageHeight, o.FileSize / o.Duration
+ 
+-    req.logger.log(DEBUG, "mab", mab)
+-    local h, bCopy, vbitrate, abitrate = -1, true, string.format("%dk", mab/1024), '128k'
++    local frameRate, mih, minw =o.FrameRate * speed, o.ImageHeight, o.ImageWidth
++    local av_bitrate = o.FileSize * 8 / o.Duration / 1024 --kbps
++    local a_bitrate = 128 --kbps
++    local v_bitrate = max_bitrate - 128
++    if v_bitrate < 0: v_bitrate = max_bitrate
++    req.logger.log(DEBUG, "bitrate", av_bitrate, a_bitrate, v_bitrate)
++
++    local h, w, bCopy = -1, -1, true
+     if quality == "High" and mih > 1080 then h=1080; end;
+     if quality == "Normal" and mih>720 then h=720; end;
+     if quality == "Low" and mih>360 then h=360; end;
++    if h > 0 then w = miw * h / mih; end
+ 
+-    if quality == "High" then
+-        vbitrate, abitrate = "2500k", "256k"
+-        if mab > 2500*1024 then bCopy = false; end;
++    if quality == "High" and av_bitrate > 3000 then
++        bCopy = false
++        a_bitrate = 256
++        v_bitrate = 2500
+     end
+-    if quality == "Normal" then
+-        vbitrate, abitrate = "1200k", "128k"
+-        if mab > 1200*1024 then bCopy = false; end;
++    if quality == "Normal" and av_bitrate > 1500 then
++        bCopy = false
++        a_bitrate = 128
++        v_bitrate = 1200
+     end
+-    if quality == "Low" then
+-        vbitrate, abitrate = "400k", "64k"
+-        if mab > 400 * 1024 then bCopy = false; end;
++    if quality == "Low" and av_bitrate > 600 then
++        bCopy = false
++        a_bitrate = 64
++        v_bitrate = 400
+     end
+ 
+     ---TODO
+-    --local cmd, mime = ff_transcode(fullPath, ss, speed, bCopy, h, frameRate, vbitrate, abitrate)
+-    local cmd, mime = gst_transcode(fullPath, ss, speed, h, frameRate, vbitrate, 1)
++    local sz_abr = string.format("%dk", a_bitrate)
++    local sz_vbr = string.format("%dk", v_bitrate)
++    --local cmd, mime = ff_transcode(fullPath, bCopy, ss, speed, h, frameRate, sz_vbr, sz_abr)
++    local cmd, mime = gst_transcode(fullPath, bCopy, ss, speed, h, w, frameRate, v_bitrate, a_bitrate, 1)
+     req.logger.log(DEBUG, "play cmd:", cmd, mime)
+ 
+     local reqInfo={}
+-- 
+2.30.1 (Apple Git-130)
+
