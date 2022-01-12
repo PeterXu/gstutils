@@ -2,6 +2,10 @@
 -- base tools
 --
 
+function shexecute(cmd)
+    return os.execute(cmd)
+end
+
 function ifone(a, b, c)
     if a then return b else return c end
 end
@@ -39,7 +43,7 @@ function script_path()
 end
 
 function sh_which(cmd)
-    return os.execute(string.format("which %s >/dev/null", cmd))
+    return shexecute(string.format("which %s >/dev/null", cmd))
 end
 
 --
@@ -51,7 +55,7 @@ function gst_launch(opts)
 end
 
 function gst_inspect(plugin)
-    return os.execute(string.format("gst-inspect-1.0 %s >/dev/null 2>&1", plugin))
+    return shexecute(string.format("gst-inspect-1.0 %s >/dev/null 2>&1", plugin))
 end
 
 -- check video HW/SW decoder
@@ -66,8 +70,9 @@ function gst_inspect_video_dec(caps, default)
 end
 
 -- check video HW/SW encoder(only use h264)
-function gst_inspect_video_enc(bps) 
+function gst_inspect_video_enc(kbps) 
     local codec
+    local bps = tonumber(kbps) * 1024
     if gst_inspect("mpph264enc") then
         codec = string.format("mpph264enc rc-mode=vbr bps=%d profile=main ! h264parse", bps)
     elseif gst_inspect("avenc_h264") then
@@ -259,7 +264,7 @@ function gst_discover(src)
 end
 
 -- transcode routine
-function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
+function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kbps, outf)
     local TAG = ">"
 
     -- check media info(audio/video)
@@ -307,7 +312,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     end
 
     -- check video enc
-    local venc = gst_inspect_video_enc(bps)
+    local venc = gst_inspect_video_enc(v_kbps)
     print (TAG .. "video-enc:", venc, "\n")
     if venc == nil then
         return nil
@@ -427,24 +432,25 @@ function test_gst(fname, outf, stdout)
     width = 1280/2
     height = 720/2
     fps = 15
-    bps = 600*1000
+    vkbps = 600 -- video
+    akbps = 64 -- audio
     copy = false
 
     local cmd, mime
     if stdout then
-        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, 1)
+        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, 1)
         if cmd then
             cmd = string.format("%s >%s", cmd, outf)
         end
     else
-        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, outf)
+        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, outf)
     end
 
     print("============", fname, "===========", mime)
     if cmd then
         print(cmd)
         local begintm = os.time();
-        os.execute(cmd)
+        shexecute(cmd)
         local endtm = os.time();
         print(os.difftime(endtm, begintm))
     end
