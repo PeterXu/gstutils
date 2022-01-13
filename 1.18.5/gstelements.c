@@ -27,15 +27,15 @@
 
 #include <gst/gst.h>
 
-#include "gstqueue.h"
+#include "gstqueuex.h"
 
 #include "gst/gst-i18n-lib.h"
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  if (!gst_element_register (plugin, "queue3", GST_RANK_NONE,
-          gst_queue_get_type ()))
+  if (!gst_element_register (plugin, "queuex", GST_RANK_NONE,
+          gst_queuex_get_type ()))
     return FALSE;
 
   return TRUE;

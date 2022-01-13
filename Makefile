@@ -24,41 +24,28 @@ vflags = $(gstvideo_lib)
 
 
 ### all
-all: videoscale queue launch
-
+all: larks launch
 
 ### test
 TEST_SRCS = gsttest.c
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 
+### larks
+LARKS_SRCS = $(gstver)/gstqueuex.c $(gstver)/gstelements.c
+LARKS_OBJS = $(LARKS_SRCS:.c=.o)
+LARKS_LIB = libgstlarks.dylib
+LARKS_BIN = testlarks.bin
 
-### videoscale
-VS_SRCS = $(gstver)/videoscale/gstvideoscale.c
-VS_OBJS = $(VS_SRCS:.c=.o)
-VS_LIB = libgstvideoscale2.dylib
-VS_BIN = testvideoscale2.bin
-videoscale: $(TEST_OBJS) $(VS_OBJS)
-	@echo "=== Generate $(VS_LIB) ==="
-	@$(CC) -shared -o $(VS_LIB) $(VS_OBJS) $(vflags) $(ldflags)
-	@echo "=== Generate $(VS_BIN) ==="
-	@$(CC) -o $(VS_BIN) $(TEST_OBJS) $(VS_OBJS) $(vflags) $(ldflags)
-videoscale_clean:
-	@$(RM) -f $(VS_OBJS) $(VS_LIB) $(VS_BIN)
+larks: $(LARKS_OBJS)
+	@echo "=== Generate $(LARKS_LIB) ==="
+	@$(CC) -shared -o $(LARKS_LIB) $(LARKS_OBJS) $(vflags) $(ldflags)
 
+larks_test: $(TEST_OBJS) $(LARKS_OBJS)
+	@echo "=== Generate $(LARKS_BIN) ==="
+	@$(CC) -o $(LARKS_BIN) $(TEST_OBJS) $(LARKS_OBJS) $(vflags) $(ldflags)
 
-### queue
-QU_SRCS = $(gstver)/queue/gstqueue.c $(gstver)/queue/gstelements.c
-QU_OBJS = $(QU_SRCS:.c=.o)
-QU_LIB = libgstqueue3.dylib
-QU_BIN = testqueue3.bin
-queue: $(TEST_OBJS) $(QU_OBJS)
-	@echo "=== Generate $(QU_LIB) ==="
-	@$(CC) -shared -o $(QU_LIB) $(QU_OBJS) ${ldflags}
-	@echo "=== Generate $(QU_BIN) ==="
-	@$(CC) -o $(QU_BIN) $(TEST_OBJS) $(QU_OBJS) ${ldflags}
-queue_clean:
-	@$(RM) -f $(QU_OBJS) $(QU_LIB) $(QU_BIN)
-
+larks_clean:
+	@$(RM) -f $(LARKS_OBJS) $(LARKS_LIB) $(LARKS_BIN)
 
 ### gst-launch
 LH_SRCS = $(gstver)/gst-launch.c
@@ -73,5 +60,10 @@ launch_clean:
 
 
 ### clean
-clean: videoscale_clean queue_clean launch_clean
+clean: larks_clean launch_clean
 	@rm -f $(TEST_OBJS)
+
+
+### check
+check:
+	$(shell gst-inspect-1.0 --gst-plugin-path=. | grep larks)
