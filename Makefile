@@ -31,7 +31,11 @@ TEST_SRCS = gsttest.c
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 
 ### larks
-LARKS_SRCS = $(gstver)/gstqueuex.c $(gstver)/gstelements.c
+LARKS_SRCS = \
+	$(gstver)/gstqueuex.c \
+	$(gstver)/gstelements.c \
+	$(gstver)/gstvideoscalex.c
+
 LARKS_OBJS = $(LARKS_SRCS:.c=.o)
 LARKS_LIB = libgstlarks.dylib
 LARKS_BIN = testlarks.bin

@@ -28,6 +28,7 @@
 #include <gst/gst.h>
 
 #include "gstqueuex.h"
+#include "gstvideoscalex.h"
 
 #include "gst/gst-i18n-lib.h"
 
@@ -36,6 +37,10 @@ plugin_init (GstPlugin * plugin)
 {
   if (!gst_element_register (plugin, "queuex", GST_RANK_NONE,
           gst_queuex_get_type ()))
+    return FALSE;
+
+  if (!gst_element_register (plugin, "videoscalex", GST_RANK_NONE,
+          GST_TYPE_VIDEO_SCALEX))
     return FALSE;
 
   return TRUE;
