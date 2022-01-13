@@ -4,7 +4,7 @@
  *                    2000,2005,2007 Wim Taymans <wim.taymans@gmail.com>
  *                    2007 Thiago Sousa Santos <thiagoss@lcc.ufcg.edu.br>
  *
- * gstqueue2.h:
+ * gstqueuex.h:
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -21,34 +21,34 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
-#ifndef __GST_QUEUE2_H__
-#define __GST_QUEUE2_H__
+#ifndef __GST_QUEUEX_H__
+#define __GST_QUEUEX_H__
 
 #include <gst/gst.h>
 #include <stdio.h>
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_QUEUE2 \
-  (gst_queue2_get_type())
-#define GST_QUEUE2(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_QUEUE2,GstQueue2))
-#define GST_QUEUE2_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_QUEUE2,GstQueue2Class))
-#define GST_IS_QUEUE2(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_QUEUE2))
-#define GST_IS_QUEUE2_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_QUEUE2))
-#define GST_QUEUE2_CAST(obj) \
-  ((GstQueue2 *)(obj))
+#define GST_TYPE_QUEUEX \
+  (gst_queuex_get_type())
+#define GST_QUEUEX(obj) \
+  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_QUEUEX,GstQueuex))
+#define GST_QUEUEX_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_QUEUEX,GstQueuexClass))
+#define GST_IS_QUEUEX(obj) \
+  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_QUEUEX))
+#define GST_IS_QUEUEX_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_QUEUEX))
+#define GST_QUEUEX_CAST(obj) \
+  ((GstQueuex *)(obj))
 
-typedef struct _GstQueue2 GstQueue2;
-typedef struct _GstQueue2Size GstQueue2Size;
-typedef struct _GstQueue2Class GstQueue2Class;
-typedef struct _GstQueue2Range GstQueue2Range;
+typedef struct _GstQueuex GstQueuex;
+typedef struct _GstQueuexSize GstQueuexSize;
+typedef struct _GstQueuexClass GstQueuexClass;
+typedef struct _GstQueuexRange GstQueuexRange;
 
 /* used to keep track of sizes (current and max) */
-struct _GstQueue2Size
+struct _GstQueuexSize
 {
   guint buffers;
   guint bytes;
@@ -56,9 +56,9 @@ struct _GstQueue2Size
   guint64 rate_time;
 };
 
-struct _GstQueue2Range
+struct _GstQueuexRange
 {
-  GstQueue2Range *next;
+  GstQueuexRange *next;
 
   guint64 offset;          /* offset of range start in source */
   guint64 rb_offset;       /* offset of range start in ring buffer */
@@ -68,7 +68,7 @@ struct _GstQueue2Range
   guint64 max_reading_pos; /* latest requested offset in source */
 };
 
-struct _GstQueue2
+struct _GstQueuex
 {
   GstElement element;
 
@@ -104,8 +104,8 @@ struct _GstQueue2
   gboolean last_query; /* result of last serialized query */
   GstQuery *last_handled_query;
 
-  GstQueue2Size cur_level;       /* currently in the queue */
-  GstQueue2Size max_level;       /* max. amount of data allowed in the queue */
+  GstQueuexSize cur_level;       /* currently in the queue */
+  GstQueuexSize max_level;       /* max. amount of data allowed in the queue */
   gboolean use_buffering;
   gboolean use_tags_bitrate;
   gboolean use_rate_estimate;
@@ -147,8 +147,8 @@ struct _GstQueue2
   gboolean temp_remove;
   FILE *temp_file;
   /* list of downloaded areas and the current area */
-  GstQueue2Range *ranges;
-  GstQueue2Range *current;
+  GstQueuexRange *ranges;
+  GstQueuexRange *current;
   /* we need this to send the first new segment event of the stream
    * because we can't save it on the file */
   gboolean segment_event_received;
@@ -170,13 +170,13 @@ struct _GstQueue2
   GMutex buffering_post_lock; /* assures only one posted at a time */
 };
 
-struct _GstQueue2Class
+struct _GstQueuexClass
 {
   GstElementClass parent_class;
 };
 
-G_GNUC_INTERNAL GType gst_queue2_get_type (void);
+G_GNUC_INTERNAL GType gst_queuex_get_type (void);
 
 G_END_DECLS
 
-#endif /* __GST_QUEUE2_H__ */
+#endif /* __GST_QUEUEX_H__ */
