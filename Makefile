@@ -66,4 +66,4 @@ clean: larks_clean launch_clean
 
 ### check
 check:
-	$(shell gst-inspect-1.0 --gst-plugin-path=. | grep larks)
+	@echo $(shell gst-inspect-1.0 --gst-plugin-path=. | grep larks)
