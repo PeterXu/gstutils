@@ -27,20 +27,25 @@
 
 #include <gst/gst.h>
 
-#include "gstqueue.h"
+#include "gstqueuex.h"
+#include "gstvideoscalex.h"
 
 #include "gst/gst-i18n-lib.h"
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  if (!gst_element_register (plugin, "queue3", GST_RANK_NONE,
-          gst_queue_get_type ()))
+  if (!gst_element_register (plugin, "queuex", GST_RANK_NONE,
+          gst_queuex_get_type ()))
+    return FALSE;
+
+  if (!gst_element_register (plugin, "videoscalex", GST_RANK_NONE,
+          GST_TYPE_VIDEO_SCALEX))
     return FALSE;
 
   return TRUE;
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR, GST_VERSION_MINOR, larks,
-    "GStreamer lark elements", plugin_init, VERSION, GST_LICENSE,
+    "GStreamer larks elements", plugin_init, VERSION, GST_LICENSE,
     GST_PACKAGE_NAME, GST_PACKAGE_ORIGIN);
