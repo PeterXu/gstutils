@@ -114,6 +114,9 @@ struct _GstQueuex
   GstClockTime buffering_interval;
   guint downstream_bitrate;     /* the bitrate reported by downstream */
 
+  guint min_sink_interval;
+  guint min_src_interval;
+
   /* low/high watermarks for buffering */
   gint low_watermark;
   gint high_watermark;
