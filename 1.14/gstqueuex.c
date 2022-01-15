@@ -465,7 +465,7 @@ gst_queuex_class_init (GstQueuexClass * klass)
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
 
-  gst_element_class_set_static_metadata (gstelement_class, "Queue 2",
+  gst_element_class_set_static_metadata (gstelement_class, "Queue x",
       "Generic",
       "Simple data queue",
       "Erik Walthinsen <omega@cse.ogi.edu>, "
