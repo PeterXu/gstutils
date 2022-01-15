@@ -1,4 +1,6 @@
 gstver = $(lastword $(shell gst-inspect-1.0 --version | grep GStreamer))
+tmpver = $(subst ., ,$(gstver))
+gstpath = $(word 1,$(tmpver)).$(word 2,$(tmpver))
 
 glib_inc=$(shell pkg-config --cflags glib-2.0)
 glib_lib=$(shell pkg-config --libs glib-2.0)
@@ -24,10 +26,15 @@ vflags = $(gstvideo_lib)
 
 
 ### all
-all: larks
+all: prepare larks
+
+prepare:
+	@echo "=== current gstreamer version $(gstver) and symbol link to $(gstpath)"
+	@rm -f $(gstver)
+	@ln -s $(gstpath) $(gstver)
 
 ### test
-TEST_SRCS = gsttest.c
+TEST_SRCS = tests/gsttest.c
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 
 ### larks
@@ -66,8 +73,11 @@ launch_clean:
 ### clean
 clean: larks_clean launch_clean
 	@rm -f $(TEST_OBJS)
+	@rm -f $(gstver)
 
 
 ### check
 check:
-	@echo $(shell gst-inspect-1.0 --gst-plugin-path=. | grep larks)
+	@export GST_DEBUG=2;GST_PLUGIN_LOADING=5;GST_REGISTRY=5
+	@echo $(shell gst-inspect-1.0 --gst-plugin-path=. larks)
+

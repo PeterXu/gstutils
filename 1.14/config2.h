@@ -1,14 +1,15 @@
-#ifndef CONFIG2
-#define CONFIG2
+#ifndef __GST_CONFIG2_H__
+#define __GST_CONFIG2_H__
 
-#define PACKAGE_NAME "gstreamer"
 #define PACKAGE "gstreamer"
-#define GETTEXT_PACKAGE "gstreamer"
-#define GST_PACKAGE_NAME "gstreamer"
+#define PACKAGE_NAME "GStreamer"
+#define GETTEXT_PACKAGE "gstreamer-1.0"
 
-#define GST_PACKAGE_ORIGIN "http://"
-#define VERSION "1.18.5"
-#define GST_API_VERSION "1.18.5"
-#define GST_LICENSE "GNU"
+#define GST_PACKAGE_NAME "Gstreamer custom"
+#define GST_PACKAGE_ORIGIN "https://developer.gnome.org/gstreamer/"
+#define GST_API_VERSION "1.0"
+#define GST_LICENSE "LGPL"
 
-#endif
+#define VERSION "1.14.x"
+
+#endif // __GST_CONFIG2_H__
