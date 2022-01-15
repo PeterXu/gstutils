@@ -111,6 +111,9 @@ struct _GstQueuex
   gboolean use_rate_estimate;
   GstClockTime buffering_interval;
 
+  guint min_sink_interval;
+  guint min_src_interval;
+
   /* low/high watermarks for buffering */
   gint low_watermark;
   gint high_watermark;
