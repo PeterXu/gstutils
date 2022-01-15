@@ -24,7 +24,7 @@ vflags = $(gstvideo_lib)
 
 
 ### all
-all: larks launch
+all: larks
 
 ### test
 TEST_SRCS = gsttest.c
@@ -33,8 +33,8 @@ TEST_OBJS = $(TEST_SRCS:.c=.o)
 ### larks
 LARKS_SRCS = \
 	$(gstver)/gstqueuex.c \
-	$(gstver)/gstelements.c \
-	$(gstver)/gstvideoscalex.c
+	$(gstver)/gstvideoscalex.c \
+	$(gstver)/gstelements.c
 
 LARKS_OBJS = $(LARKS_SRCS:.c=.o)
 LARKS_LIB = libgstlarks.dylib
