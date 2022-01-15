@@ -9,6 +9,6 @@
 #define GST_PACKAGE_ORIGIN "http://"
 #define VERSION "1.18.5"
 #define GST_API_VERSION "1.18.5"
-#define GST_LICENSE "GNU"
+#define GST_LICENSE "LGPL"
 
 #endif
