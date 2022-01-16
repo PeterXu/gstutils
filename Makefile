@@ -15,7 +15,7 @@ gstvideo_lib=$(shell pkg-config --libs gstreamer-video-1.0)
 
 
 
-cflags = $(glib_inc) $(gst_inc) $(gstbase_inc) -I$(gstver)
+cflags = $(glib_inc) $(gst_inc) $(gstbase_inc) -I$(gstver) -Icommon
 ldflags = $(gstbase_lib) $(gst_lib) $(glib_lib)
 vflags = $(gstvideo_lib)
 

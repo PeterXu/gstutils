@@ -327,6 +327,10 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
             opts = "-q"
         end
     end
+    local oopts = os.getenv('GST_OPTIONS')
+    if oopts then
+        opts = string.format("%s %s", opts, oopts)
+    end
 
     -- gst-launch command line
     local line

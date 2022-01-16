@@ -62,6 +62,7 @@
 #endif
 
 #include "gstqueuex.h"
+#include "gstqueuex_ext.c"
 
 #include <glib/gstdio.h>
 
@@ -467,13 +468,8 @@ gst_queuex_class_init (GstQueuexClass * klass)
       "Conversion value between data size and time",
       0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
-  obj_props[PROP_MIN_SINK_INTERVAL] = g_param_spec_uint ("min-sink-interval", "Interval (ms)",
-      "Min interval between sink-pad incoming adjacent packets",
-      0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
-
-  obj_props[PROP_MIN_SRC_INTERVAL] = g_param_spec_uint ("min-src-interval", "Interval (ms)",
-      "Min interval between src-pad outgoing adjacent packets",
-      0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+  obj_props[PROP_MIN_SINK_INTERVAL] = gst_queuex_ext_sink_property ();
+  obj_props[PROP_MIN_SRC_INTERVAL] = gst_queuex_ext_src_property ();
 
   g_object_class_install_properties (gobject_class, PROP_LAST, obj_props);
 
@@ -573,8 +569,7 @@ gst_queuex_init (GstQueuex * queue)
 
   queue->use_bitrate_query = DEFAULT_USE_BITRATE_QUERY;
 
-  queue->min_sink_interval = 0;
-  queue->min_src_interval = 0;
+  gst_queuex_ext_init (&queue->ext);
 
   GST_DEBUG_OBJECT (queue,
       "initialized queue's not_empty & not_full conditions");
@@ -3213,6 +3208,9 @@ gst_queuex_loop (GstPad * pad)
     if (started)
       g_timer_continue (queue->out_timer);
   }
+
+  gst_queuex_ext_check_src_timeout(&queue->ext);
+
   ret = gst_queuex_push_one (queue);
   queue->srcresult = ret;
   queue->sinkresult = ret;
@@ -3994,10 +3992,10 @@ gst_queuex_set_property (GObject * object,
       queue->use_bitrate_query = g_value_get_boolean (value);
       break;
     case PROP_MIN_SINK_INTERVAL:
-      queue->min_sink_interval = g_value_get_uint (value);
+      gst_queuex_ext_set_sink_interval (&queue->ext, value);
       break;
     case PROP_MIN_SRC_INTERVAL:
-      queue->min_src_interval = g_value_get_uint (value);
+      gst_queuex_ext_set_src_interval (&queue->ext, value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -4101,10 +4099,10 @@ gst_queuex_get_property (GObject * object,
       break;
     }
     case PROP_MIN_SINK_INTERVAL:
-      g_value_set_uint (value, queue->min_sink_interval);
+      gst_queuex_ext_get_sink_interval (&queue->ext, value);
       break;
     case PROP_MIN_SRC_INTERVAL:
-      g_value_set_uint (value, queue->min_src_interval);
+      gst_queuex_ext_get_src_interval (&queue->ext, value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);

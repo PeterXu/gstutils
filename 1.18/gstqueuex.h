@@ -27,6 +27,7 @@
 #include <gst/gst.h>
 #include <stdio.h>
 #include <gst/base/gstqueuearray.h>
+#include "gstqueuex_ext.h"
 
 G_BEGIN_DECLS
 
@@ -114,8 +115,7 @@ struct _GstQueuex
   GstClockTime buffering_interval;
   guint downstream_bitrate;     /* the bitrate reported by downstream */
 
-  guint min_sink_interval;
-  guint min_src_interval;
+  GstQueuexExt ext;
 
   /* low/high watermarks for buffering */
   gint low_watermark;
