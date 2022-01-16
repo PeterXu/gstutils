@@ -6,6 +6,10 @@ function shexecute(cmd)
     return os.execute(cmd)
 end
 
+function sh_which(cmd)
+    return shexecute(string.format("which %s >/dev/null", cmd))
+end
+
 function ifone(a, b, c)
     if a then return b else return c end
 end
@@ -53,13 +57,9 @@ function script_path()
   return str:match("(.*[/\\])") or "."
 end
 
-function sh_which(cmd)
-    return shexecute(string.format("which %s >/dev/null", cmd))
-end
-
 
 --
--- gst process, supported env: GST_OPTIONS/GST_VIDEO_DEC_DELAY/GST_VIDEO_ENC_DELAY
+-- gst tools, supported env: GST_OPTIONS/GST_VIDEO_DEC_DELAY/GST_VIDEO_ENC_DELAY
 -- 
 
 function gst_launch(opts)
@@ -87,10 +87,11 @@ end
 -- check element queue/queuex
 function gst_inspect_queue(sink_interval, src_interval)
     local element = "queue"
-    local sink_val = tonumber(sink_interval)
-    local src_val = tonumber(src_interval)
-    if sink_val > 0 or src_val > 0 then
-        if gst_inspect("queuex") then
+    if gst_inspect("queuex") then
+        element = "queuex"
+        local sink_val = tonumber(sink_interval)
+        local src_val = tonumber(src_interval)
+        if sink_val > 0 or src_val > 0 then
             element = string.format("queuex min-sink-interval=%d min-src-interval=%d",
                                     math.floor(sink_val), math.floor(src_val))
         end
@@ -352,20 +353,28 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
         aparse = ainfo and ainfo.parse,
         adec = ainfo and ainfo.dec,
         arate = nil,
-        aenc = nil,
+        aenc = gst_inspect_audio_enc(a_kbps),
 
         -- video
         vparse = vinfo and vinfo.parse,
         vdec = vinfo and vinfo.dec,
         vrate = nil,
         vscale = nil,
-        venc = nil,
+        venc = gst_inspect_video_enc(v_kbps),
 
         -- sink
         mux = "mpegtsmux",
         mime = "video/mpegts",
-        sink = nil,
+        sink = nil
     }
+
+    if not media.aenc or not media.venc then
+        print (TAG .. "media: no encoder(aac/h264)")
+        return nil
+    end
+    print (TAG .. "audio: encoder -", media.aenc, "\n")
+    print (TAG .. "video: encoder -", media.venc, "\n")
+
 
     -- check output sink
     local opts
@@ -374,9 +383,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
         media.sink = string.format("filesink location=%s", outf)
     else
         media.sink = string.format("fdsink fd=%d", dstfd)
-        if dstfd == 1 then
-            opts = "-q"
-        end
+        opts = ifone(dstfd == 1, "-q", "")
     end
 
     -- check input src
@@ -398,7 +405,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     media.arate = string.format("speed speed=%f", speed)
     media.vrate = string.format("videorate rate=%f ! video/x-raw", speed)
     if fps > 0 then
-        media.vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
+        media.vrate = media.vrate .. string.format(",framerate=%d/1", fps)
     end
 
     -- check audio dec/enc
@@ -407,15 +414,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     else
         media.adec = string.format("queue ! %s ! queue ! decodebin", media.aparse) -- auto
     end
-
-    local aenc = gst_inspect_audio_enc(a_kbps)
-    if aenc then
-        print (TAG .. "audio: encoder -", aenc, "\n")
-        media.aenc = string.format("%s ! %s", aenc, aqueue_enc)
-    else
-        print (TAG .. "audio: no encoder(avenc_aac)")
-        return nil
-    end
+    media.aenc = string.format("%s ! %s", media.aenc, aqueue_enc)
 
     -- check video dec/enc
     if media.vdec then
@@ -423,20 +422,12 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     else
         media.vdec = string.format("queue ! %s ! queue ! decodebin", media.vparse) -- auto
     end
-
-    local venc = gst_inspect_video_enc(v_kbps)
-    if venc then
-        print (TAG .. "video: encoder -", venc, "\n")
-        media.venc = string.format("%s ! %s", venc, vqueue_enc)
-    else
-        print (TAG .. "video: no h264 encoder")
-        return nil
-    end
+    media.venc = string.format("%s ! %s", media.venc, vqueue_enc)
 
     -- check video scale
     media.vscale = string.format("videoscale ! video/x-raw")
     if tonumber(width) > 0 and tonumber(height) > 0 then
-        media.vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
+        media.vscale = media.vscale .. string.format(",width=%d,height=%d", width, height)
     end
 
     local line
@@ -447,7 +438,8 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
         if false or (media.aparse and media.vparse) then
             if media.demux == "matroskademux" then
                 media.mux = "matroskamux"
-                mime = media.caps
+                media.mime = media.caps
+                mime = media.mime
             end
             line = string.format([[%s ! %s name=demux \
                 demux.audio_0 ! queue ! %s ! %s name=mux \
