@@ -2929,6 +2929,7 @@ gst_queuex_chain_buffer_or_buffer_list (GstQueuex * queue,
   gst_queuex_locked_enqueue (queue, item, item_type);
   GST_QUEUEX_MUTEX_UNLOCK (queue);
   gst_queuex_post_buffering (queue);
+  gst_queuex_ext_check_sink_timeout (&queue->ext); /* peter */
 
   return GST_FLOW_OK;
 
@@ -3208,9 +3209,6 @@ gst_queuex_loop (GstPad * pad)
     if (started)
       g_timer_continue (queue->out_timer);
   }
-
-  gst_queuex_ext_check_src_timeout(&queue->ext);
-
   ret = gst_queuex_push_one (queue);
   queue->srcresult = ret;
   queue->sinkresult = ret;
@@ -3219,6 +3217,7 @@ gst_queuex_loop (GstPad * pad)
 
   GST_QUEUEX_MUTEX_UNLOCK (queue);
   gst_queuex_post_buffering (queue);
+  gst_queuex_ext_check_src_timeout(&queue->ext); /* peter */
 
   return;
 
@@ -3611,6 +3610,7 @@ gst_queuex_get_range (GstPad * pad, GstObject * parent, guint64 offset,
   ret = gst_queuex_create_read (queue, offset, length, buffer);
   GST_QUEUEX_MUTEX_UNLOCK (queue);
   gst_queuex_post_buffering (queue);
+  gst_queuex_ext_check_src_timeout (&queue->ext); /* peter */
 
   return ret;
 

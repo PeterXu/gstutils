@@ -2,8 +2,23 @@
 -- base tools
 --
 
+function shexecute(cmd)
+    return os.execute(cmd)
+end
+
 function ifone(a, b, c)
     if a then return b else return c end
+end
+
+function ifelse(a, b)
+    if a then return a else return b end
+end
+
+function ifclip(v, min, max, default)
+    if not v then return default end
+    if v < min then return min end
+    if v > max then return max end
+    return v
 end
 
 function table2json(tbl, short)
@@ -39,19 +54,48 @@ function script_path()
 end
 
 function sh_which(cmd)
-    return os.execute(string.format("which %s >/dev/null", cmd))
+    return shexecute(string.format("which %s >/dev/null", cmd))
 end
 
+
 --
--- gst process
+-- gst process, supported env: GST_OPTIONS/GST_VIDEO_DEC_DELAY/GST_VIDEO_ENC_DELAY
 -- 
 
 function gst_launch(opts)
-    return string.format("gst-launch-1.0 %s", opts)
+    if type(opts) ~= "string" then opts = "" end
+    local eopts = ifelse(os.getenv("GST_OPTIONS"), "")
+    return string.format("gst-launch-1.0 %s %s", eopts, opts)
 end
 
 function gst_inspect(plugin)
-    return os.execute(string.format("gst-inspect-1.0 %s >/dev/null 2>&1", plugin))
+    local eopts = ifelse(os.getenv("GST_OPTIONS"), "")
+    local line = string.format("gst-inspect-1.0 %s %s >/dev/null 2>&1", eopts, plugin)
+    return shexecute(line)
+end
+
+function gst_video_delay(speed)
+    local decdelay = ifelse(tonumber(os.getenv("GST_VIDEO_DEC_DELAY")), 1000)
+    local encdelay = ifelse(tonumber(os.getenv("GST_VIDEO_ENC_DELAY")), 5000)
+    if speed > 0 then
+        return math.floor(decdelay/speed), math.floor(encdelay/speed)
+    else
+        return decdelay, encdelay
+    end
+end
+
+-- check element queue/queuex
+function gst_inspect_queue(sink_interval, src_interval)
+    local element = "queue"
+    local sink_val = tonumber(sink_interval)
+    local src_val = tonumber(src_interval)
+    if sink_val > 0 or src_val > 0 then
+        if gst_inspect("queuex") then
+            element = string.format("queuex min-sink-interval=%d min-src-interval=%d",
+                                    math.floor(sink_val), math.floor(src_val))
+        end
+    end
+    return element
 end
 
 -- check video HW/SW decoder
@@ -66,14 +110,24 @@ function gst_inspect_video_dec(caps, default)
 end
 
 -- check video HW/SW encoder(only use h264)
-function gst_inspect_video_enc(bps) 
+function gst_inspect_video_enc(kbps) 
     local codec
+    local bps = math.floor(tonumber(kbps)) * 1024
     if gst_inspect("mpph264enc") then
         codec = string.format("mpph264enc rc-mode=vbr bps=%d profile=main ! h264parse", bps)
     elseif gst_inspect("avenc_h264") then
         codec = string.format("avenc_h264 pass=pass1 bitrate=%d profile=main ! h264parse", bps)
     elseif gst_inspect("avenc_h264_videotoolbox") then
         codec = string.format("avenc_h264_videotoolbox pass=pass1 bitrate=%d profile=main ! h264parse", bps)
+    end
+    return codec
+end
+
+function gst_inspect_audio_enc(kbps)
+    local codec
+    local bps = math.floor(tonumber(kbps)) * 1024
+    if gst_inspect("avenc_aac") then
+        codec = string.format("avenc_aac bitrate=%d", bps)
     end
     return codec
 end
@@ -259,7 +313,7 @@ function gst_discover(src)
 end
 
 -- transcode routine
-function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
+function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kbps, outf)
     local TAG = ">"
 
     -- check media info(audio/video)
@@ -269,155 +323,199 @@ function gst_transcode(src, copy, start, speed, width, height, fps, bps, outf)
     print (TAG .. "video:", table2json(vinfo))
     if minfo == nil or (ainfo == nil and vinfo == nil) then
         return nil
-    else
-        --return nil
     end
 
     -- should have one of parse/dec
     if ainfo and (not ainfo.parse) and (not ainfo.dec) then
+        print (TAG .. "audio: unsupported audio")
         return nil
     end
 
     -- should have one of parse/dec
     if vinfo and (not vinfo.parse) and (not vinfo.dec) then
+        print (TAG .. "video: unsupported video")
         return nil
     end
 
-    local demux = minfo.demux
-    local aparse, vparse, adec, vdec
 
-    -- get audio parse/dec
-    if ainfo then
-        aparse = ainfo.parse
-        if ainfo.dec then
-            adec = string.format("queue ! %s ! queue", ainfo.dec)
-        else
-            adec = string.format("queue ! %s ! queue ! decodebin", ainfo.parse) -- auto
-        end
-    end
+    ---
+    --- construct gst launch command line
+    ---
+    local media = {
+        -- src
+        src = nil,
+        caps = minfo.caps,
+        demux = minfo.demux,
+        start_tc = nil,
 
-    -- get video parse/dec
-    if vinfo then
-        vparse = vinfo.parse
-        if vinfo.dec then
-            vdec = string.format("queue ! %s ! queue", vinfo.dec)
-        else
-            vdec = string.format("queue ! %s ! queue ! decodebin", vinfo.parse) -- auto
-        end
-    end
+        -- audio
+        aparse = ainfo and ainfo.parse,
+        adec = ainfo and ainfo.dec,
+        arate = nil,
+        aenc = nil,
 
-    -- check video enc
-    local venc = gst_inspect_video_enc(bps)
-    print (TAG .. "video-enc:", venc, "\n")
-    if venc == nil then
-        return nil
-    end
+        -- video
+        vparse = vinfo and vinfo.parse,
+        vdec = vinfo and vinfo.dec,
+        vrate = nil,
+        vscale = nil,
+        venc = nil,
 
-    -- gst-launch options
-    local opts = ""
+        -- sink
+        mux = "mpegtsmux",
+        mime = "video/mpegts",
+        sink = nil,
+    }
 
     -- check output sink
-    local outsink
-    local dst = tonumber(outf)
-    if dst == nil then
-        outsink = string.format("filesink location=%s", outf)
+    local opts
+    local dstfd = tonumber(outf)
+    if dstfd == nil then
+        media.sink = string.format("filesink location=%s", outf)
     else
-        outsink = string.format("fdsink fd=%d", dst)
-        if dst == 1 then
+        media.sink = string.format("fdsink fd=%d", dstfd)
+        if dstfd == 1 then
             opts = "-q"
         end
     end
-    local oopts = os.getenv('GST_OPTIONS')
-    if oopts then
-        opts = string.format("%s %s", opts, oopts)
+
+    -- check input src
+    media.src = string.format([[%s filesrc location="%s"]], gst_launch(opts), src)
+
+    -- check parameters
+    speed = ifclip(tonumber(speed), 0.5, 3.0, 1.0)
+    fps = ifclip(tonumber(fps), 0, 60, 0)
+
+    -- check sink queue(microseconds)
+    local vdecdelay, vencdelay = gst_video_delay(speed)
+    local vqueue_dec = gst_inspect_queue(vdecdelay, 0)
+    local vqueue_enc = gst_inspect_queue(vencdelay, 0)
+    local aqueue_dec = gst_inspect_queue(vdecdelay*0.75, 0)
+    local aqueue_enc = gst_inspect_queue(vencdelay*0.75, 0)
+
+    -- check audio/video rate
+    media.start_tc = string.format("%s:00", start)
+    media.arate = string.format("speed speed=%f", speed)
+    media.vrate = string.format("videorate rate=%f ! video/x-raw", speed)
+    if fps > 0 then
+        media.vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
     end
 
-    -- gst-launch command line
-    local line
-    local outmux = "mpegtsmux"
-    local mime = "video/mpegts"
-    local filesrc = string.format([[%s filesrc location="%s"]], gst_launch(opts), src)
-
-    local start_tc = string.format("%s:00", start)
-    local arate = string.format("speed speed=%f", speed)
-    local vrate = string.format("videorate rate=%f ! video/x-raw", speed)
-    if tonumber(fps) > 0 and tonumber(fps) <= 60 then
-        vrate = string.format("videorate rate=%f ! video/x-raw,framerate=%d/1", speed, fps)
+    -- check audio dec/enc
+    if media.adec then
+        media.adec = string.format("queue ! %s ! %s", media.adec, aqueue_dec)
+    else
+        media.adec = string.format("queue ! %s ! queue ! decodebin", media.aparse) -- auto
     end
-    local vscale = string.format("videoscale ! video/x-raw")
+
+    local aenc = gst_inspect_audio_enc(a_kbps)
+    if aenc then
+        print (TAG .. "audio: encoder -", aenc, "\n")
+        media.aenc = string.format("%s ! %s", aenc, aqueue_enc)
+    else
+        print (TAG .. "audio: no encoder(avenc_aac)")
+        return nil
+    end
+
+    -- check video dec/enc
+    if media.vdec then
+        media.vdec = string.format("queue ! %s ! %s", media.vdec, vqueue_dec)
+    else
+        media.vdec = string.format("queue ! %s ! queue ! decodebin", media.vparse) -- auto
+    end
+
+    local venc = gst_inspect_video_enc(v_kbps)
+    if venc then
+        print (TAG .. "video: encoder -", venc, "\n")
+        media.venc = string.format("%s ! %s", venc, vqueue_enc)
+    else
+        print (TAG .. "video: no h264 encoder")
+        return nil
+    end
+
+    -- check video scale
+    media.vscale = string.format("videoscale ! video/x-raw")
     if tonumber(width) > 0 and tonumber(height) > 0 then
-        vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
+        media.vscale = string.format("videoscale ! video/x-raw,width=%d,height=%d", width, height)
     end
 
-    -- copy audio/video
+    local line
+    local mime = media.mime
+
+    -- 1). copy audio/video
     if false or copy then
-        if false or (aparse and vparse) then
-            if demux == "matroskademux" then outmux = "matroskamux" end
-            mime = minfo.caps
+        if false or (media.aparse and media.vparse) then
+            if media.demux == "matroskademux" then
+                media.mux = "matroskamux"
+                mime = media.caps
+            end
             line = string.format([[%s ! %s name=demux \
                 demux.audio_0 ! queue ! %s ! %s name=mux \
                 demux.video_0 ! queue ! %s ! mux. \
                 mux. ! queue ! %s]],
-                filesrc, demux,
-                aparse, outmux, vparse,
-                outsink);
-        elseif aparse or vparse then
-            local tmp_parse = ifone(aparse, aparse, vparse)
+                media.src, media.demux,
+                media.aparse, media.mux,
+                media.vparse,
+                media.sink);
+        elseif media.aparse or media.vparse then
+            local tmp_parse = ifelse(media.aparse, media.vparse)
             line = string.format([[%s ! parsebin name=pb \
                 pb. ! %s ! queue ! %s name=mux \
                 mux. ! %s]],
-                filesrc,
-                tmp_parse, outmux,
-                outsink);
+                media.src,
+                tmp_parse, media.mux,
+                media.sink);
         else
-            print(TAG .. "unsupported: need codec-parse!")
+            print(TAG .. "media: copy need codec or parse!")
         end
         return line, mime
     end
 
-    -- audio-only
-    if false or (adec and not vdec) then
+    -- 2) audio-only transcode
+    if false or (media.adec and not media.vdec) then
         -- unsupport start-tc
         line = string.format([[%s ! parsebin name=pb \
             pb. ! %s ! audioconvert ! audio/x-raw ! %s \
-                ! avenc_aac ! queue ! %s name=mux \
+                ! %s ! %s name=mux \
             mux. ! %s ]],
-            filesrc,
-            adec, arate, outmux,
-            outsink);
+            media.src,
+            media.adec, media.arate,
+            media.aenc, media.mux,
+            media.sink);
         return line, mime
     end
 
-    -- video-only
-    if false or (not adec and vdec) then
-        -- support start-tc.
+    -- 3). video-only transcode (support start-tc)
+    if false or (not media.adec and media.vdec) then
         line = string.format([[%s ! parsebin name=pb \
             pb. ! %s ! videoconvert ! queue ! video/x-raw ! %s \
                 ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
                 wait. ! %s \
-                ! %s ! queue ! %s name=mux \
+                ! %s ! %s name=mux \
             mux. ! %s]],
-            filesrc,
-            vdec, vrate, start_tc, vscale, venc, outmux,
-            outsink);
+            media.src,
+            media.vdec, media.vrate,
+            media.start_tc,
+            media.vscale,
+            media.venc, media.mux,
+            media.sink);
         return line, mime
     end
 
-    -- audio and video
-    -- support start-tc
+    -- 4). audio and video trancode (support start-tc)
     line = string.format([[%s ! parsebin name=pb \
         pb. ! %s ! audioconvert ! queue ! audio/x-raw ! %s \
             ! avwait name=wait target-timecode-string="%s" \
-            ! avenc_aac ! queue ! %s name=mux \
+            ! %s ! %s name=mux \
         pb. ! %s ! videoconvert ! queue ! video/x-raw ! %s \
             ! timecodestamper ! wait. \
             wait. ! queue ! %s  \
-            ! %s ! queue ! mux. \
+            ! %s ! mux. \
         mux. ! %s]],
-        filesrc,
-        adec, arate, start_tc, outmux,
-        vdec, vrate, vscale, venc,
-        outsink);
+        media.src,
+        media.adec, media.arate, media.start_tc, media.aenc, media.mux,
+        media.vdec, media.vrate, media.vscale, media.venc,
+        media.sink);
     return line, mime
 end
 
@@ -430,25 +528,26 @@ function test_gst(fname, outf, stdout)
     speed = 1.0
     width = 1280/2
     height = 720/2
-    fps = 15
-    bps = 600*1000
+    fps = 15 --15
+    vkbps = 600 -- video
+    akbps = 64 -- audio
     copy = false
 
     local cmd, mime
     if stdout then
-        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, 1)
+        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, 1)
         if cmd then
             cmd = string.format("%s >%s", cmd, outf)
         end
     else
-        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, bps, outf)
+        cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, outf)
     end
 
     print("============", fname, "===========", mime)
     if cmd then
         print(cmd)
         local begintm = os.time();
-        os.execute(cmd)
+        shexecute(cmd)
         local endtm = os.time();
         print(os.difftime(endtm, begintm))
     end
