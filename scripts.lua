@@ -577,13 +577,18 @@ function test_files()
         f18 = path .. "/samples/small.mkv",
         f19 = path .. "/samples/small.asf",
         f20 = path .. "/samples/small.vob",
+        f21 = path .. "/samples/small.wmv",
+        f22 = path .. "/samples/small.mov",
+        f23 = path .. "/samples/small.ts",
     }
     
     local dinfo = false
     if dinfo then
-        test_discover({items.f05, items.f06, items.f07}) 
-        test_discover({items.f11, items.f12, items.f13, items.f14, items.f15}) 
-        test_discover({items.f16, items.f17, items.f18, items.f19, items.f20}) 
+        --test_discover({items.f01, items.f02, items.f03})
+        test_discover({items.f05, items.f06, items.f07})
+        test_discover({items.f11, items.f12, items.f13, items.f14, items.f15})
+        test_discover({items.f16, items.f17, items.f18, items.f19, items.f20})
+        test_discover({items.f21, items.f22, items.f23})
     else
         local fin = items.f03
         local fout = "/tmp/out_media.ts"
