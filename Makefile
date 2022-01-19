@@ -1,3 +1,10 @@
+OS = $(shell uname)
+ifeq ($(OS),Darwin)
+DYEXT=dylib
+else
+DYEXT=so
+endif
+
 gstver = $(lastword $(shell gst-inspect-1.0 --version | grep GStreamer))
 tmpver = $(subst ., ,$(gstver))
 gstpath = $(word 1,$(tmpver)).$(word 2,$(tmpver))
@@ -44,7 +51,7 @@ LARKS_SRCS = \
 	$(gstver)/gstelements.c
 
 LARKS_OBJS = $(LARKS_SRCS:.c=.o)
-LARKS_LIB = libgstlarks.dylib
+LARKS_LIB = libgstlarks.$(DYEXT)
 LARKS_BIN = testlarks.bin
 
 larks: $(LARKS_OBJS)
