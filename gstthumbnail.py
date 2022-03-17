@@ -91,7 +91,7 @@ if __name__ == '__main__':
     if ext == ".png":
         mtype = "image/png"
     elif ext == ".jpg" or ext == ".jpeg":
-        mtype = "image/jpg"
+        mtype = "image/jpeg"
     else:
         print("only support png or jpg")
         sys.exit(2)
