@@ -355,13 +355,11 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
 
         -- audio
         aparse = ainfo and ainfo.parse,
-        adec = ainfo and ainfo.dec,
         arate = nil,
         aenc = gst_inspect_audio_enc(a_kbps),
 
         -- video
         vparse = vinfo and vinfo.parse,
-        vdec = vinfo and vinfo.dec,
         vrate = nil,
         vscale = nil,
         venc = gst_inspect_video_enc(v_kbps),
@@ -401,9 +399,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
 
     -- check sink queue(microseconds)
     local vdecdelay, vencdelay = gst_video_delay(speed)
-    local vqueue_dec = gst_inspect_queue(vdecdelay, 0)
     local vqueue_enc = gst_inspect_queue(vencdelay, 0)
-    local aqueue_dec = gst_inspect_queue(vdecdelay*0.75, 0)
     local aqueue_enc = gst_inspect_queue(vencdelay*0.75, 0)
 
     -- check audio/video rate
@@ -416,21 +412,11 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
 
     -- check audio dec/enc
     if ainfo then
-        if media.adec then
-            media.adec = string.format("queue ! %s ! %s", media.adec, aqueue_dec)
-        else
-            media.adec = string.format("queue ! %s ! queue ! decodebin", media.aparse) -- auto
-        end
         media.aenc = string.format("%s ! %s", media.aenc, aqueue_enc)
     end
 
     -- check video dec/enc
     if vinfo then
-        if media.vdec then
-            media.vdec = string.format("queue ! %s ! %s", media.vdec, vqueue_dec)
-        else
-            media.vdec = string.format("queue ! %s ! queue ! decodebin", media.vparse) -- auto
-        end
         media.venc = string.format("%s ! %s", media.venc, vqueue_enc)
     end
 
@@ -474,7 +460,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     end
 
     -- 2) audio-only transcode
-    if false or (media.adec and not media.vdec) then
+    if false or (ainfo and not vinfo) then
         -- unsupport start-tc
         line = string.format([[%s ! decodebin name=db \
             db. ! audio/x-raw ! audioconvert ! audio/x-raw ! %s \
@@ -488,7 +474,7 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     end
 
     -- 3). video-only transcode (support start-tc)
-    if false or (not media.adec and media.vdec) then
+    if false or (not ainfo and vinfo) then
         line = string.format([[%s ! decodebin name=db \
             db. ! video/x-raw ! videoconvert ! queue ! video/x-raw ! %s \
                 ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
@@ -566,9 +552,9 @@ end
 function test_files()
     local path = script_path()
     local items = {
-        f01 = "/tmp/sample-h265.mkv",
-        f02 = "/tmp/sample-mpeg4.mkv",
-        f03 = "/tmp/sample-h264.mp4",
+        --f01 = "/tmp/sample-h265.mkv",
+        --f02 = "/tmp/sample-mpeg4.mkv",
+        --f03 = "/tmp/sample-h264.mp4",
 
         f05 = path .. "/samples/small.ogg",
         f06 = path .. "/samples/small.m4a",
@@ -596,9 +582,12 @@ function test_files()
         test_discover({items.f16, items.f17, items.f18, items.f19, items.f20})
         test_discover({items.f21, items.f22, items.f23})
     else
-        local fin = items.f23
-        local fout = "/tmp/out_media.mp4"
-        test_gst(fin, fout)
+        for _, item in pairs(items) do
+            local fin = item
+            local fout = "/tmp/out_media.mp4"
+            test_gst(fin, fout)
+            print("=====================\n\n")
+        end
     end
 end
 
