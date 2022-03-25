@@ -89,12 +89,13 @@ def make_h264_enc(kbps):
             "bitrate":  bps,
             "profile":  "main",
             }
+    parse = make_elem("h264parse")
     enc = make_elem("mppvideoenc", props1)
     if not enc:
         enc = make_elem("avenc_h264_videotoolbox", props2)
     if not enc:
         enc = make_elem("avenc_h264", props2)
-    return enc
+    return parse, enc
 
 def make_audio_dec(atype):
     info = [None, None]
@@ -143,10 +144,11 @@ def make_audio_dec(atype):
     print("audio-dec:", info)
     return elems
 
-def make_audio_enc(kbps):
+def make_aac_enc(kbps):
     bps = kbps * 1024
     enc = make_elem("avenc_aac", {"bitrate": bps})
-    return enc
+    parse = make_elem("aacparse")
+    return parse, enc
 
 def make_queuex(sinkTime, srcTime):
     elem = Gst.ElementFactory.make("queuex")
@@ -169,25 +171,50 @@ class Transcoder(object):
     def do_print(self):
         print(self.offset, self.mtype, self.width, self.height, self.outfile)
 
-    def convert_media(self, srcbin, minfo, outf):
-        if not minfo[1]:
-            return
-        queue = make_elem("queue")
-        sink = make_elem("filesink", {"location": outf})
+    def add_elems(self, elems=[]):
+        for e in elems:
+            if e: self.pipeline.add(e)
 
-        if minfo[0]:
-            self.pipeline.add(minfo[0])
-        self.pipeline.add(queue)
-        self.pipeline.add(minfo[1])
-        self.pipeline.add(sink)
+    def convert_audio(self, bin, pad, aparse, aenc):
+        caps1 = Gst.Caps.from_string("audio/x-raw")
+        filter1 = make_elem("capsfilter", {"caps": caps1})
+        convert = make_elem("audioconvert")
+        queue1 = make_elem("queue")
+        # aenc
+        # aparse
+        queue2 = make_elem("queue")
+        self.add_elems([filter1, convert, queue1, aenc, aparse, queue2])
 
-        if minfo[0]:
-            srcbin.link(minfo[0])
-            minfo[0].link(queue)
-        else:
-            srcbin.link(queue)
-        queue.link(minfo[1])
-        minfo[1].link(sink)
+        #pad.link(filter1.get_static_pad("sink"))
+        #filter1.link(convert)
+        pad.link(convert.get_static_pad("sink"));
+
+        convert.link(queue1)
+        queue1.link(aenc)
+        aenc.link(aparse)
+        aparse.link(queue2)
+        queue2.link(self.mux)
+        self.mux.link(self.sink)
+
+    def convert_video(self, bin, pad, vparse, venc):
+        caps1 = Gst.Caps.from_string("video/x-raw")
+        filter1 = make_elem("capsfilter", {"caps": caps1})
+        convert = make_elem("videoconvert")
+        queue1 = make_elem("queue")
+        #venc
+        #vparse
+        queue2 = make_elem("queue")
+        self.add_elems([filter1, convert, queue1, venc, vparse, queue2])
+
+        #pad.link(filter1.get_static_pad("sink"))
+        #filter1.link(convert)
+        pad.link(convert.get_static_pad("sink"));
+        convert.link(queue1)
+        queue1.link(venc)
+        venc.link(vparse)
+        vparse.link(queue2)
+        queue2.link(self.mux)
+        self.mux.link(self.sink)
 
     def on_pad_added(self, obj, pad):
         caps = pad.get_current_caps()
@@ -196,34 +223,32 @@ class Transcoder(object):
         print(type(caps), szcaps)
         print("====")
         if szcaps.startswith("video/"):
-            vinfo = make_video_dec(szcaps)
-            self.convert_media(obj, vinfo, "/tmp/out1.ts")
+            vparse, venc = make_h264_enc(1024)
+            self.convert_video(obj, pad, vparse, venc)
+            pass
         elif szcaps.startswith("audio/"):
-            ainfo = make_audio_dec(szcaps)
-            self.convert_media(obj, ainfo, "/tmp/out2.ts")
-            self.pipeline.set_state(Gst.State.PLAYING);
+            aparse, aenc = make_aac_enc(64)
+            self.convert_audio(obj, pad, aparse, aenc)
+            pass
 
     def do_convert(self):
         self.pipeline = Gst.Pipeline()
+
         source = make_elem("filesrc", {"location": self.infile})
-        self.pipeline.add(source)
+        db = make_elem("decodebin", None, "db")
+        db.connect("pad-added", self.on_pad_added)
+        mux = make_elem("mpegtsmux", None, "mux")
+        sink = make_elem("filesink", {"location": self.outfile})
+        self.add_elems([source, db, mux, sink])
+        source.link(db)
+        #mux.link(sink)
 
-        pb = make_elem("parsebin", None, "pb")
-        self.pipeline.add(pb)
-        pb.connect("pad-added", self.on_pad_added)
-        source.link(pb)
-
-        #mux = make_elem("mpegtsmux", None, "mux")
-        #self.pipeline.add(mux)
-
-        #sink = make_elem("filesink")
-        #self.pipeline.add(sink)
-
-        self.check_run2()
-
+        self.mux = mux
+        self.sink = sink
+        self.check_run()
 
     def on_message(self, bus, msg):
-        #print("message:", msg, msg.type)
+        print("message:", msg, msg.type)
         if msg.type == Gst.MessageType.EOS:
             self.pipeline.set_state(Gst.State.NULL)
             self.loop.quit()
@@ -232,9 +257,13 @@ class Transcoder(object):
             err, debug = msg.parse_error()
             print("Error: %s" % err, debug)
             self.loop.quit()
+        elif msg.type == Gst.MessageType.STATE_CHANGED:
+            ret = self.pipeline.set_state(Gst.State.PLAYING)
+            print("Changed:", ret)
+            pass
         pass
 
-    def check_run2(self):
+    def check_run(self):
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self.on_message)
@@ -248,45 +277,6 @@ class Transcoder(object):
             pass
         print("run end");
         self.pipeline.set_state(Gst.State.NULL)
-
-    def check_run(self):
-        ret = self.pipeline.set_state(Gst.State.PLAYING)
-        if ret == Gst.StateChangeReturn.FAILURE:
-            print("ERROR: Unable to set the pipeline to the playing state")
-            sys.exit(1)
-
-        terminate = False
-        bus = self.pipeline.get_bus()
-        while True:
-            msg = bus.timed_pop_filtered(Gst.CLOCK_TIME_NONE,
-                    Gst.MessageType.STATE_CHANGED | Gst.MessageType.EOS | Gst.MessageType.ERROR)
-            if not msg:
-                print("====")
-                continue
-            t = msg.type
-            if t == Gst.MessageType.ERROR:
-                err, dbg = msg.parse_error()
-                print("ERROR:", msg.src.get_name(), " ", err.message)
-                if dbg:
-                    print("debugging info:", dbg)
-                terminate = True
-            elif t == Gst.MessageType.EOS:
-                print("End-Of-Stream reached")
-                terminate = True
-            elif t == Gst.MessageType.STATE_CHANGED:
-                if msg.src == self.pipeline:
-                    old_state, new_state, pending_state = msg.parse_state_changed()
-                    print("Pipeline state changed from {0:s} to {1:s}".format(
-                        Gst.Element.state_get_name(old_state),
-                        Gst.Element.state_get_name(new_state)))
-                pass
-            else:
-                print("ERROR: Unexpected message received")
-                break
-            if terminate:
-                break;
-        self.pipeline.set_state(Gst.State.NULL)
-
 
 def help_usage(bin, err):
     print("usage: %s -h -i input -t timeoffset -s widthxheight output" % bin)

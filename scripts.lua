@@ -369,6 +369,8 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
         -- sink
         mux = "mpegtsmux",
         mime = "video/mpegts",
+        --mux = "qtmux",
+        --mime = "video/quicktime",
         sink = nil
     }
 
@@ -474,12 +476,12 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     -- 2) audio-only transcode
     if false or (media.adec and not media.vdec) then
         -- unsupport start-tc
-        line = string.format([[%s ! parsebin name=pb \
-            pb. ! %s ! audioconvert ! audio/x-raw ! %s \
+        line = string.format([[%s ! decodebin name=db \
+            db. ! audio/x-raw ! audioconvert ! audio/x-raw ! %s \
                 ! %s ! %s name=mux \
             mux. ! %s ]],
             media.src,
-            media.adec, media.arate,
+            media.arate,
             media.aenc, media.mux,
             media.sink);
         return line, mime
@@ -487,34 +489,31 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
 
     -- 3). video-only transcode (support start-tc)
     if false or (not media.adec and media.vdec) then
-        line = string.format([[%s ! parsebin name=pb \
-            pb. ! %s ! videoconvert ! queue ! video/x-raw ! %s \
+        line = string.format([[%s ! decodebin name=db \
+            db. ! video/x-raw ! videoconvert ! queue ! video/x-raw ! %s \
                 ! timecodestamper ! avwait name=wait target-timecode-string="%s" \
-                wait. ! %s \
-                ! %s ! %s name=mux \
+                wait. ! %s ! %s name=mux \
             mux. ! %s]],
             media.src,
-            media.vdec, media.vrate,
+            media.vrate,
             media.start_tc,
-            media.vscale,
             media.venc, media.mux,
             media.sink);
         return line, mime
     end
 
     -- 4). audio and video trancode (support start-tc)
-    line = string.format([[%s ! parsebin name=pb \
-        pb. ! %s ! audioconvert ! queue ! audio/x-raw ! %s \
+    line = string.format([[%s ! decodebin name=db \
+        db. ! audio/x-raw ! audioconvert ! queue ! audio/x-raw ! %s \
             ! avwait name=wait target-timecode-string="%s" \
             ! %s ! %s name=mux \
-        pb. ! %s ! videoconvert ! queue ! video/x-raw ! %s \
+        db. ! video/x-raw ! videoconvert ! queue ! video/x-raw ! %s \
             ! timecodestamper ! wait. \
-            wait. ! queue ! %s  \
-            ! %s ! mux. \
+            wait. ! queue ! %s ! mux. \
         mux. ! %s]],
         media.src,
-        media.adec, media.arate, media.start_tc, media.aenc, media.mux,
-        media.vdec, media.vrate, media.vscale, media.venc,
+        media.arate, media.start_tc, media.aenc, media.mux,
+        media.vrate, media.venc,
         media.sink);
     return line, mime
 end
@@ -597,14 +596,14 @@ function test_files()
         test_discover({items.f16, items.f17, items.f18, items.f19, items.f20})
         test_discover({items.f21, items.f22, items.f23})
     else
-        local fin = items.f03
-        local fout = "/tmp/out_media.ts"
+        local fin = items.f23
+        local fout = "/tmp/out_media.mp4"
         test_gst(fin, fout)
     end
 end
 
 function test_one()
-    fname = "./samples/small.mp4"
+    fname = "/deepnas/home/U1000/avatar.mp4"
     copy = false
     start = "00:00:00"
     speed = 1
@@ -613,10 +612,10 @@ function test_one()
     fps = 30
     vkbps = 400
     akbps = 60
-    cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/out.ts")
+    cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/out.mp4")
     print(cmd, mime)
     --shexecute(cmd)
 end
 
 --test_files()
-test_one()
+--test_one()
