@@ -28,7 +28,7 @@ end
 function table2json(tbl, short)
     local newline = ifone(short, "", "\n")
     local jstr = "{" .. newline
-    if type(tbl) == "table" then 
+    if type(tbl) == "table" then
         for k, v in pairs(tbl) do
             local val = ifone(type(v) == "table", "...", tostring(v))
             jstr = jstr .. string.format("  %s: %s,", tostring(k), val) .. newline
@@ -51,7 +51,7 @@ function findistr(str, pat)
     return findstr(str, pat, true)
 end
 
--- get path of currrent executing script 
+-- get path of currrent executing script
 function script_path()
   local str = debug.getinfo(2, "S").source:sub(2)
   return str:match("(.*[/\\])") or "."
@@ -60,7 +60,7 @@ end
 
 --
 -- gst tools, supported env: GST_OPTIONS/GST_VIDEO_DEC_DELAY/GST_VIDEO_ENC_DELAY
--- 
+--
 
 function gst_launch(opts)
     if type(opts) ~= "string" then opts = "" end
@@ -71,7 +71,11 @@ end
 function gst_inspect(plugin)
     local eopts = ifelse(os.getenv("GST_OPTIONS"), "")
     local line = string.format("gst-inspect-1.0 %s %s >/dev/null 2>&1", eopts, plugin)
-    return shexecute(line)
+    local iret = shexecute(line)
+    if type(iret) == "boolean" then
+        return iret
+    end
+    return (iret == 0)
 end
 
 function gst_video_delay(speed)
@@ -111,7 +115,7 @@ function gst_inspect_video_dec(caps, default)
 end
 
 -- check video HW/SW encoder(only use h264)
-function gst_inspect_video_enc(kbps) 
+function gst_inspect_video_enc(kbps)
     local codec
     local bps = math.floor(tonumber(kbps)) * 1024
     if gst_inspect("mpph264enc") then
@@ -182,7 +186,7 @@ function gst_audio_info(caps, props)
                 elseif findistr(props, "layer=(int)3") then
                     info = {parse = "mpegaudioparse", dec = "avdec_mp3"}
                 end
-            elseif findistr(props, "mpegversion=(int)2") 
+            elseif findistr(props, "mpegversion=(int)2")
                 or findistr(props, "mpegversion=(int)4") then
                 info = {parse = "aacparse", dec = "avdec_aac"}
             end
@@ -295,7 +299,7 @@ function gst_discover(src)
     local line = string.format("gst-discoverer-1.0 -v %s", src)
     local fp = io.popen(line)
     for info in fp:lines() do
-        local ret, props 
+        local ret, props
         ret, props = string.match(info, "container: ([%w%-%/]+)[%,]*(.*)")
         if ret then minfo = gst_media_info(ret, props) end
         if not minfo then
@@ -409,20 +413,24 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     end
 
     -- check audio dec/enc
-    if media.adec then
-        media.adec = string.format("queue ! %s ! %s", media.adec, aqueue_dec)
-    else
-        media.adec = string.format("queue ! %s ! queue ! decodebin", media.aparse) -- auto
+    if ainfo then
+        if media.adec then
+            media.adec = string.format("queue ! %s ! %s", media.adec, aqueue_dec)
+        else
+            media.adec = string.format("queue ! %s ! queue ! decodebin", media.aparse) -- auto
+        end
+        media.aenc = string.format("%s ! %s", media.aenc, aqueue_enc)
     end
-    media.aenc = string.format("%s ! %s", media.aenc, aqueue_enc)
 
     -- check video dec/enc
-    if media.vdec then
-        media.vdec = string.format("queue ! %s ! %s", media.vdec, vqueue_dec)
-    else
-        media.vdec = string.format("queue ! %s ! queue ! decodebin", media.vparse) -- auto
+    if vinfo then
+        if media.vdec then
+            media.vdec = string.format("queue ! %s ! %s", media.vdec, vqueue_dec)
+        else
+            media.vdec = string.format("queue ! %s ! queue ! decodebin", media.vparse) -- auto
+        end
+        media.venc = string.format("%s ! %s", media.venc, vqueue_enc)
     end
-    media.venc = string.format("%s ! %s", media.venc, vqueue_enc)
 
     -- check video scale
     media.vscale = string.format("videoscale ! video/x-raw")
@@ -581,10 +589,9 @@ function test_files()
         f22 = path .. "/samples/small.mov",
         f23 = path .. "/samples/small.ts",
     }
-    
+
     local dinfo = false
     if dinfo then
-        --test_discover({items.f01, items.f02, items.f03})
         test_discover({items.f05, items.f06, items.f07})
         test_discover({items.f11, items.f12, items.f13, items.f14, items.f15})
         test_discover({items.f16, items.f17, items.f18, items.f19, items.f20})
@@ -596,5 +603,20 @@ function test_files()
     end
 end
 
+function test_one()
+    fname = "./samples/small.mp4"
+    copy = false
+    start = "00:00:00"
+    speed = 1
+    width = 640
+    height = 360
+    fps = 30
+    vkbps = 400
+    akbps = 60
+    cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/out.ts")
+    print(cmd, mime)
+    --shexecute(cmd)
+end
 
-test_files()
+--test_files()
+test_one()
