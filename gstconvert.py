@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import getopt
+import _thread as thread
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -21,6 +22,11 @@ def make_elem(name, props={}, alias=None):
         for k,v in props.items():
             elem.set_property(k, v)
     return elem
+
+def make_caps_filter(szcaps):
+    # "video/x-raw", "audio/x-raw"
+    caps = Gst.Caps.from_string(szcaps)
+    return make_elem("capsfilter", {"caps": caps})
 
 def make_video_dec(vtype):
     info = [None, None]
@@ -175,61 +181,61 @@ class Transcoder(object):
         for e in elems:
             if e: self.pipeline.add(e)
 
+    def set_playing(self, elems=[]):
+        for e in elems:
+            e.set_state(Gst.State.PLAYING)
+
+    def link_elems(self, elems=[]):
+        last = None
+        for e in elems:
+            if not last:
+                last = e
+            else:
+                last.link(e)
+                last=e
+
+    def link_pads(self, elems=[]):
+        last = None
+        for e in elems:
+            if not last:
+                last = e
+            else:
+                src = last.get_static_pad("src")
+                dst = e.get_static_pad("sink")
+                #print("yzxu", last.get_name(), e.get_name(), dst)
+                src.link(dst)
+                last = e
+
     def convert_audio(self, bin, pad, aparse, aenc):
-        caps1 = Gst.Caps.from_string("audio/x-raw")
-        filter1 = make_elem("capsfilter", {"caps": caps1})
         convert = make_elem("audioconvert")
         queue1 = make_elem("queue")
-        # aenc
-        # aparse
         queue2 = make_elem("queue")
-        self.add_elems([filter1, convert, queue1, aenc, aparse, queue2])
+        self.add_elems([convert, queue1, aenc, aparse, queue2])
 
-        #pad.link(filter1.get_static_pad("sink"))
-        #filter1.link(convert)
+        self.link_elems([convert, queue1, aenc, queue2, self.mux])
         pad.link(convert.get_static_pad("sink"));
-
-        convert.link(queue1)
-        queue1.link(aenc)
-        aenc.link(aparse)
-        aparse.link(queue2)
-        queue2.link(self.mux)
-        self.mux.link(self.sink)
+        self.set_playing([convert, queue1, aenc, queue2])
 
     def convert_video(self, bin, pad, vparse, venc):
-        caps1 = Gst.Caps.from_string("video/x-raw")
-        filter1 = make_elem("capsfilter", {"caps": caps1})
         convert = make_elem("videoconvert")
         queue1 = make_elem("queue")
-        #venc
-        #vparse
         queue2 = make_elem("queue")
-        self.add_elems([filter1, convert, queue1, venc, vparse, queue2])
+        self.add_elems([convert, queue1, venc, vparse, queue2])
 
-        #pad.link(filter1.get_static_pad("sink"))
-        #filter1.link(convert)
-        pad.link(convert.get_static_pad("sink"));
-        convert.link(queue1)
-        queue1.link(venc)
-        venc.link(vparse)
-        vparse.link(queue2)
-        queue2.link(self.mux)
-        self.mux.link(self.sink)
+        self.link_elems([convert, queue1, venc, vparse, queue2, self.mux])
+        pad.link(convert.get_static_pad("sink"))
+        self.set_playing([convert, queue1, venc, vparse, queue2])
 
     def on_pad_added(self, obj, pad):
         caps = pad.get_current_caps()
         szcaps = caps.to_string()
-        print("====")
-        print(type(caps), szcaps)
-        print("====")
+        #print(type(caps), szcaps)
         if szcaps.startswith("video/"):
             vparse, venc = make_h264_enc(1024)
             self.convert_video(obj, pad, vparse, venc)
-            pass
         elif szcaps.startswith("audio/"):
             aparse, aenc = make_aac_enc(64)
             self.convert_audio(obj, pad, aparse, aenc)
-            pass
 
     def do_convert(self):
         self.pipeline = Gst.Pipeline()
@@ -241,15 +247,30 @@ class Transcoder(object):
         sink = make_elem("filesink", {"location": self.outfile})
         self.add_elems([source, db, mux, sink])
         source.link(db)
-        #mux.link(sink)
+        mux.link(sink)
 
         self.mux = mux
         self.sink = sink
         self.check_run()
 
+    def do_seek(self):
+        if self.offset == 0:
+            return
+        print("seek to offset:", self.offset)
+        self.pipeline.set_state(Gst.State.PAUSED)
+        #self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        seek_time = self.offset * Gst.SECOND
+        #self.pipeline.seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH, Gst.SeekType.SET,
+        #        seek_time, Gst.SeekType.NONE, -1);
+        #self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        self.pipeline.seek_simple(Gst.Format.TIME,  Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, seek_time)
+        self.pipeline.set_state(Gst.State.PLAYING)
+        self.offset = 0
+
     def on_message(self, bus, msg):
-        print("message:", msg, msg.type)
+        #print("message:", msg, msg.type)
         if msg.type == Gst.MessageType.EOS:
+            print("EOS and quit")
             self.pipeline.set_state(Gst.State.NULL)
             self.loop.quit()
         elif msg.type == Gst.MessageType.ERROR:
@@ -258,8 +279,8 @@ class Transcoder(object):
             print("Error: %s" % err, debug)
             self.loop.quit()
         elif msg.type == Gst.MessageType.STATE_CHANGED:
-            ret = self.pipeline.set_state(Gst.State.PLAYING)
-            print("Changed:", ret)
+            #ret = self.pipeline.set_state(Gst.State.PLAYING)
+            #print("Changed:", ret)
             pass
         pass
 
@@ -270,6 +291,9 @@ class Transcoder(object):
 
         self.loop = GLib.MainLoop()
         ret = self.pipeline.set_state(Gst.State.PLAYING)
+        thread.start_new_thread(self.seek_thread, ())
+        #self.do_seek()
+        #GLib.timeout_add(200, self.do_seek)
         print("run begin:", ret)
         try:
             self.loop.run()
@@ -278,10 +302,24 @@ class Transcoder(object):
         print("run end");
         self.pipeline.set_state(Gst.State.NULL)
 
+    def seek_thread(self):
+        while True:
+            time.sleep(0.05)
+            success, position = self.pipeline.query_position(Gst.Format.TIME)
+            if success:
+                value = float(position) / Gst.SECOND
+                print("position:", value)
+                if value < 2:
+                    self.do_seek()
+                    break
+
+
+
 def help_usage(bin, err):
     print("usage: %s -h -i input -t timeoffset -s widthxheight output" % bin)
     print()
     sys.exit(err)
+
 
 if __name__ == '__main__':
     try:
@@ -294,7 +332,7 @@ if __name__ == '__main__':
     coder = Transcoder()
     coder.infile = None,
     coder.outfile = args[0]
-    coder.offset = 3 # default 3s
+    coder.offset = 0 # seconds
 
     for o, a in opts:
         if o == "-h":
