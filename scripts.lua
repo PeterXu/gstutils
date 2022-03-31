@@ -54,7 +54,28 @@ end
 -- get path of currrent executing script
 function script_path()
   local str = debug.getinfo(2, "S").source:sub(2)
+  print(str);
   return str:match("(.*[/\\])") or "."
+end
+
+function parse_path(path)
+    local dir, name, ext
+    dir = path:match("(.*)[/\\]")
+    ext = path:match(".*%.(.*)")
+    if dir and ext then
+        name = path:match(".*[/\\](.*)%..*")
+    elseif dir then
+        name = path:match(".*[/\\](.*)")
+    elseif ext then
+        name = path:match("(.*)%..*")
+    else
+        name = path
+    end
+    if not dir or #dir == 0 then dir = "." end
+    if not name or #name == 0 then name = nil end
+    if not ext or #ext == 0 then ext = nil end
+    --print (">", path, dir, name, ext)
+    return dir, name, ext
 end
 
 
@@ -317,7 +338,7 @@ function gst_discover(src)
     return minfo, ainfo, vinfo
 end
 
--- transcode routine
+-- transcode routine: outf - int/string/nil
 function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kbps, outf)
     local TAG = ">"
 
@@ -382,12 +403,17 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
 
     -- check output sink
     local opts
-    local dstfd = tonumber(outf)
-    if dstfd == nil then
-        media.sink = string.format("filesink location=%s", outf)
+    if outf then
+        local dstfd = tonumber(outf)
+        if dstfd == nil then
+            media.sink = string.format("filesink location=%s", outf)
+        else
+            media.sink = string.format("fdsink fd=%d", dstfd)
+            opts = ifone(dstfd == 1, "-q", "")
+        end
     else
-        media.sink = string.format("fdsink fd=%d", dstfd)
-        opts = ifone(dstfd == 1, "-q", "")
+        opts = "-q"
+        media.sink = "";
     end
 
     -- check input src
@@ -504,6 +530,27 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
     return line, mime
 end
 
+
+--- outf: like before, e.g. /tmp/out_hls.mp4, changed to hls output(/tmp/out_hls.m38u)
+function gst_transcode_hls(src, copy, start, speed, width, height, fps, v_kbps, a_kbps, outf)
+    dir, name, ext = parse_path(outf)
+    if not dir or not name then
+        return nil, nil
+    end
+    fm38u = string.format([[%s/%s.m38u]], dir, name)
+    fsegment = string.format([[%s/%s_segment_%%05d.ts]], dir, name)
+
+    cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, nil)
+    if cmd then
+        hlscmd = string.format([[%s hlssink max-files=50 target-duration=15 playlist-length=5 \
+            playlist-location="%s" location="%s"]],
+            cmd, fm38u, fsegment)
+        return hlscmd, mime
+    end
+    return nil, nil
+end
+
+
 --
 -- testing cases
 --
@@ -593,6 +640,7 @@ end
 
 function test_one()
     fname = "/deepnas/home/U1000/avatar.mp4"
+    fname = "./samples/small.mp4"
     copy = false
     start = "00:00:00"
     speed = 1
@@ -601,10 +649,10 @@ function test_one()
     fps = 30
     vkbps = 400
     akbps = 60
-    cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/out.mp4")
+    cmd, mime = gst_transcode_hls(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/out.mp4")
     print(cmd, mime)
     --shexecute(cmd)
 end
 
 --test_files()
---test_one()
+test_one()
