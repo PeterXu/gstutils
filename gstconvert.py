@@ -15,20 +15,44 @@ def format_ns(ns):
     h, m = divmod(m, 60)
     return "%u:%02u:%02u.%09u" % (h, m, s, ns)
 
-def make_elem(name, props={}, alias=None):
+def gst_link_elems(elems, dst=None):
+    last = None
+    for e in elems:
+        if last: last.link(e)
+        last = e
+    if last and dst: last.link(dst)
+
+def gst_link_pads(elems):
+    last = None
+    for e in elems:
+        if last:
+            src = last.get_static_pad("src")
+            dst = e.get_static_pad("sink")
+            if not src or not dst:
+                print("no static pad:", src, dst)
+                break
+            src.link(dst)
+        last = e
+
+def gst_set_playing(elems=[]):
+    for e in elems:
+        e.set_state(Gst.State.PLAYING)
+
+def gst_make_elem(name, props={}, alias=None):
     if not name: return None
+    #print(name, props, alias)
     elem = Gst.ElementFactory.make(name, alias)
     if elem and props:
         for k,v in props.items():
             elem.set_property(k, v)
     return elem
 
-def make_caps_filter(szcaps):
+def gst_make_caps_filter(szcaps):
     # "video/x-raw", "audio/x-raw"
     caps = Gst.Caps.from_string(szcaps)
-    return make_elem("capsfilter", {"caps": caps})
+    return gst_make_elem("capsfilter", {"caps": caps})
 
-def make_video_dec(vtype):
+def gst_make_video_dec(vtype):
     info = [None, None]
     if vtype.find("video/x-h264") >= 0:
         info = ["h264parse", "avdec_h264"]
@@ -74,16 +98,16 @@ def make_video_dec(vtype):
             else:
                 info = ["vc1parse", "avdec_vc1"]
     elems = [None, None]
-    elems[0] = make_elem(info[0])
+    elems[0] = gst_make_elem(info[0])
     mppCaps = "video/x-vp8;video/x-vp9;video/x-h264;video/x-h265;video/mpeg,mpegversion="
     if mppCaps.find(vtype) >= 0:
-        elems[1] = make_elem("mppvideodec")
+        elems[1] = gst_make_elem("mppvideodec")
     if not elems[1]:
-        elems[1] = make_elem(info[1])
+        elems[1] = gst_make_elem(info[1])
     print("video-dec:", info)
     return elems
 
-def make_h264_enc(kbps):
+def gst_make_h264_enc(kbps):
     bps = kbps * 1024
     props1 = {
             "rc-mode":  "vbr",
@@ -95,15 +119,15 @@ def make_h264_enc(kbps):
             "bitrate":  bps,
             "profile":  "main",
             }
-    parse = make_elem("h264parse")
-    enc = make_elem("mppvideoenc", props1)
+    parse = gst_make_elem("h264parse")
+    enc = gst_make_elem("mppvideoenc", props1)
     if not enc:
-        enc = make_elem("avenc_h264_videotoolbox", props2)
+        enc = gst_make_elem("avenc_h264_videotoolbox", props2)
     if not enc:
-        enc = make_elem("avenc_h264", props2)
+        enc = gst_make_elem("avenc_h264", props2)
     return parse, enc
 
-def make_audio_dec(atype):
+def gst_make_audio_dec(atype):
     info = [None, None]
     if atype.find("audio/mpeg") >= 0:
         if atype.find("mpegversion=(int)1") >= 0:
@@ -145,24 +169,24 @@ def make_audio_dec(atype):
         elif atype.find("wmaversion=(int)4") >= 0:
             info = [None, "avdec_wmalossless"]
     elems = [None, None]
-    elems[0] = make_elem(info[0])
-    elems[1] = make_elem(info[1])
+    elems[0] = gst_make_elem(info[0])
+    elems[1] = gst_make_elem(info[1])
     print("audio-dec:", info)
     return elems
 
-def make_aac_enc(kbps):
+def gst_make_aac_enc(kbps):
     bps = kbps * 1024
-    enc = make_elem("avenc_aac", {"bitrate": bps})
-    parse = make_elem("aacparse")
+    enc = gst_make_elem("avenc_aac", {"bitrate": bps})
+    parse = gst_make_elem("aacparse")
     return parse, enc
 
-def make_queuex(sinkTime, srcTime):
-    elem = Gst.ElementFactory.make("queuex")
+def gst_make_queuex(sinkTime, srcTime):
+    elem = gst_make_elem("queuex")
     if elem:
         elem.set_property("min-sink-interval=%d" % sinkTime)
         elem.set_property("min-src-interval=%d" % srcTime)
     else:
-        return Gst.ElementFactory.make("queue")
+        return gst_make_elem("queue")
 
 
 class Transcoder(object):
@@ -181,77 +205,88 @@ class Transcoder(object):
         for e in elems:
             if e: self.pipeline.add(e)
 
-    def set_playing(self, elems=[]):
-        for e in elems:
-            e.set_state(Gst.State.PLAYING)
+    def convert_audio(self, pad, kbps):
+        aparse, aenc = gst_make_aac_enc(kbps)
+        convert = gst_make_elem("audioconvert")
+        queue1 = gst_make_elem("queue", alias="aq1")
+        queue2 = gst_make_elem("queue", alias="aq2")
+        elems = [convert, queue1, aenc, queue2]
+        self.add_elems(elems)
 
-    def link_elems(self, elems=[]):
-        last = None
-        for e in elems:
-            if not last:
-                last = e
-            else:
-                last.link(e)
-                last=e
-
-    def link_pads(self, elems=[]):
-        last = None
-        for e in elems:
-            if not last:
-                last = e
-            else:
-                src = last.get_static_pad("src")
-                dst = e.get_static_pad("sink")
-                #print("yzxu", last.get_name(), e.get_name(), dst)
-                src.link(dst)
-                last = e
-
-    def convert_audio(self, bin, pad, aparse, aenc):
-        convert = make_elem("audioconvert")
-        queue1 = make_elem("queue")
-        queue2 = make_elem("queue")
-        self.add_elems([convert, queue1, aenc, aparse, queue2])
-
-        self.link_elems([convert, queue1, aenc, queue2, self.mux])
+        gst_link_elems(elems, self.mux)
         pad.link(convert.get_static_pad("sink"));
-        self.set_playing([convert, queue1, aenc, queue2])
+        gst_set_playing(elems)
 
-    def convert_video(self, bin, pad, vparse, venc):
-        convert = make_elem("videoconvert")
-        queue1 = make_elem("queue")
-        queue2 = make_elem("queue")
-        self.add_elems([convert, queue1, venc, vparse, queue2])
+    def convert_video(self, pad, kbps):
+        vparse, venc = gst_make_h264_enc(kbps)
+        convert = gst_make_elem("videoconvert")
+        queue1 = gst_make_elem("queue", alias="vq1")
+        queue2 = gst_make_elem("queue", alias="vq2")
+        elems = [convert, queue1, venc, vparse, queue2]
+        self.add_elems(elems)
 
-        self.link_elems([convert, queue1, venc, vparse, queue2, self.mux])
+        gst_link_elems(elems, self.mux)
         pad.link(convert.get_static_pad("sink"))
-        self.set_playing([convert, queue1, venc, vparse, queue2])
+        gst_set_playing(elems)
+
+    def link_video(self):
+        elems = self.video_elems
+        gst_link_elems(elems, self.mux)
+        convert = elems[0]
+        self.video_pad.link(convert.get_static_pad("sink"))
+        gst_set_playing(elems)
 
     def on_pad_added(self, obj, pad):
         caps = pad.get_current_caps()
         szcaps = caps.to_string()
-        #print(type(caps), szcaps)
-        if szcaps.startswith("video/"):
-            vparse, venc = make_h264_enc(1024)
-            self.convert_video(obj, pad, vparse, venc)
-        elif szcaps.startswith("audio/"):
-            aparse, aenc = make_aac_enc(64)
-            self.convert_audio(obj, pad, aparse, aenc)
+        print(type(caps), szcaps)
+        if szcaps.startswith("audio/"):
+            self.audio_pad = pad
+            self.convert_audio(self.audio_pad, 64)
+        elif szcaps.startswith("video/"):
+            self.video_pad = pad
+            self.convert_video(self.video_pad, 1024)
 
     def do_convert(self):
         self.pipeline = Gst.Pipeline()
 
-        source = make_elem("filesrc", {"location": self.infile})
-        db = make_elem("decodebin", None, "db")
+        source = gst_make_elem("filesrc", {"location": self.infile})
+        db = gst_make_elem("decodebin", alias="db")
         db.connect("pad-added", self.on_pad_added)
-        mux = make_elem("mpegtsmux", None, "mux")
-        sink = make_elem("filesink", {"location": self.outfile})
+        mux = gst_make_elem("mpegtsmux", alias="mux")
+        sink = gst_make_elem("filesink", {"location": self.outfile})
         self.add_elems([source, db, mux, sink])
         source.link(db)
         mux.link(sink)
 
+        self.db = db
         self.mux = mux
         self.sink = sink
         self.check_run()
+        
+    def do_seek3(self):
+        #self.pipeline.set_state(Gst.State.PAUSED)
+        seek_time = self.offset * Gst.SECOND
+        event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.KEY_UNIT|Gst.SeekFlags.FLUSH,
+                Gst.SeekType.SET, seek_time, Gst.SeekType.NONE, -1)
+        #self.db.seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH,
+        #        Gst.SeekType.SET, seek_time, Gst.SeekType.NONE, -1);
+        print(seek_time, event)
+        self.pipeline.send_event(event)
+        pass
+
+    def do_seek2(self):
+        print("seek begin")
+        self.pipeline.set_state(Gst.State.PAUSED)
+        self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        print("seek go")
+        #self.convert_audio(self.audio_pad, 64)
+        seek_time = self.offset * Gst.SECOND
+        self.pipeline.seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH, Gst.SeekType.SET,
+            seek_time, Gst.SeekType.NONE, -1);
+        self.convert_video(self.video_pad, 1024)
+        self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        print("seek end");
 
     def do_seek(self):
         if self.offset == 0:
@@ -291,7 +326,8 @@ class Transcoder(object):
 
         self.loop = GLib.MainLoop()
         ret = self.pipeline.set_state(Gst.State.PLAYING)
-        thread.start_new_thread(self.seek_thread, ())
+        self.do_seek3()
+        #thread.start_new_thread(self.seek_thread, ())
         #self.do_seek()
         #GLib.timeout_add(200, self.do_seek)
         print("run begin:", ret)
@@ -310,7 +346,7 @@ class Transcoder(object):
                 value = float(position) / Gst.SECOND
                 print("position:", value)
                 if value < 2:
-                    self.do_seek()
+                    #self.do_seek()
                     break
 
 
