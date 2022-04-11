@@ -233,7 +233,14 @@ class Transcoder(object):
             print(">message: step done")
         pass
 
+    def do_position(self):
+        ok, position = self.pipeline.query_position(Gst.Format.TIME)
+        if ok:
+            print("yzxu", position)
+        pass
+
     def check_run(self):
+        GLib.timeout_add(200, self.do_position)
         self.do_seek2()
 
         bus = self.pipeline.get_bus()
