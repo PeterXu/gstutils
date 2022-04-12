@@ -53,7 +53,10 @@ class HlsService:
 
 def run_hls_service(conn):
     logf = "/tmp/hls_service.txt"
-    logging.basicConfig(filename=logf, encoding='utf-8', level=logging.DEBUG)
+    logging.basicConfig(filename=logf, encoding='utf-8',
+            format='%(asctime)s [%(levelname)s][hls-srv] %(message)s',
+            datefmt='%m/%d/%Y %H:%M:%S',
+            level=logging.DEBUG)
     hls = HlsService(conn)
     hls.run_forever()
 
@@ -73,7 +76,7 @@ class HlsClient:
         pass
 
     def run_listen(self, msg):
-        while True:
+        while not self.stopped:
             try:
                 ret = self.conn.poll(1)
                 if ret:
@@ -85,8 +88,13 @@ class HlsClient:
 
 
     def start(self):
+        self.stopped = False
         thread.start_new_thread(self.run_service, ())
         thread.start_new_thread(self.run_listen, ())
+
+    def stop(self):
+        self.stopped = True
+        self.child.kill()
 
     def run_service(self):
         logging.info("hls-cli run begin")
@@ -113,6 +121,11 @@ class MyHTTPRequestHandler:
         '.Z': 'application/octet-stream',
         '.bz2': 'application/x-bzip2',
         '.xz': 'application/x-xz',
+        '.md': 'text/markdown',
+        '.mp4': 'video/mp4',
+        '.mov': 'video/quicktime',
+        '.ts': 'video/MP2T',
+        '.m38u': 'application/x-mpegURL',
     }
 
     def __init__(self, directory=None):
@@ -148,43 +161,57 @@ class MyHTTPRequestHandler:
             return True
         return False
 
-    def check_hls(self, uri, headers):
-        # hls segement files
+    async def check_hls(self, uri, headers):
+        # segement file
         pos = uri.find("hlsvod/")
         path = self.translate_path("/root", uri)
         if pos == 0:
             if not os.path.exists(path):
-                return None
+                #TODO: not exists and check hls service
+                # waiting timeout
+                return None, path
             if not os.path.isfile(path):
-                return None
-            return path
+                return web.HTTPNotFound(reason="File not found"), None
+            return None, path
 
         # m38u file
         parts = os.path.splitext(path)
         if parts[1] == ".m38u":
             if os.path.exists(path):
-                if not os.path.isfile(path):
-                    return None
-            #TODO: check exist or modified
-            #TODO: start hls service
+                weberr, st_mtime = self.read_st_mtime(path)
+                if weberr:
+                    return weberr, None
+                if self.check_modified(st_mtime, headers):
+                    return web.HTTPNotModified(), None
+                return None, path
+            #TODO: not exists and start hls service
             #waiting timeout
-            return path
+            return None, path
 
         # source files
+        # redirect to m38u or access directly.
         path = self.translate_path(self.directory, uri)
-        if not os.path.exists(path) or not os.path.isfile(path):
-            return None
-        return path
+        if os.path.isdir(path):
+            return None, path
+        weberr, st_mtime = self.read_st_mtime(path)
+        if weberr:
+            return weberr, None
+        if self.check_modified(st_mtime, headers):
+            return web.HTTPNotModified(), None
+        return None, path
 
     async def do_File(self, request):
         logging.info("do_File begin")
-        headers = {}
         try:
+            headers = request.headers
             uri = request.match_info["uri"]
         except:
             uri = ""
-        self.check_hls(uri)
-        path = self.translate_path(uri)
+
+        err, path = await self.check_hls(uri, headers)
+        if err:
+            return err
+
         print(uri, path)
         resp = self.send_static(uri, headers, path)
         print(resp, type(resp))
@@ -200,25 +227,38 @@ class MyHTTPRequestHandler:
             else:
                 return self.list_directory(uri, path)
 
-        ctype = self.guess_type(path)
         if path.endswith("/"):
             return web.HTTPNotFound(reason="File not found")
+
+        weberr, st_mtime = self.read_st_mtime(path)
+        if weberr:
+            return weberr
+
+        if self.check_modified(st_mtime, headers):
+            return web.HTTPNotModified()
+
+        headers2 = {}
+        headers2["Content-type"] = self.guess_type(path)
+        headers2["Last-Modified"] = self.date_time_string(st_mtime)
+        return web.FileResponse(path=uri, headers=headers2, status=200)
+
+    def read_st_mtime(self, path):
+        if not os.path.isfile(path):
+            return web.HTTPNotFound(reason="File not found"), None
+
         try:
             f = open(path, 'rb')
         except OSError:
-            return web.HTTPNotFound(reason="File not found")
+            return web.HTTPNotFound(reason="File not found"), None
 
+        rets = [None, None]
         try:
             fs = os.fstat(f.fileno())
-            f.close()
-            if self.check_modified(fs.st_mtime, headers):
-                return web.HTTPNotModified()
-            resp_headers = {}
-            resp_headers["Content-type"] = ctype
-            resp_headers["Last-Modified"] = self.date_time_string(fs.st_mtime)
-            return web.FileResponse(path=uri, headers=resp_headers, status=200)
+            rets[1] = fs.st_mtime
         except:
-            return web.HTTPInternalServerError()
+            rets[0] = web.HTTPInternalServerError()
+        f.close()
+        return rets[0], rets[1]
 
     def check_modified(self, st_mtime, headers):
         if ("If-Modified-Since" in headers and "If-None-Match" not in headers):
@@ -230,8 +270,7 @@ class MyHTTPRequestHandler:
                 if ims.tzinfo is None:
                     ims = ims.replace(tzinfo=datetime.timezone.utc)
                 if ims.tzinfo is datetime.timezone.utc:
-                    last_modif = datetime.datetime.fromtimestamp(
-                                st_mtime, datetime.timezone.utc)
+                    last_modif = datetime.datetime.fromtimestamp(st_mtime, datetime.timezone.utc)
                     last_modif = last_modif.replace(microsecond=0)
                     if last_modif <= ims:
                         return True
@@ -345,7 +384,10 @@ async def run_other_task():
 
 
 def do_main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+            format='%(asctime)s [%(levelname)s][hls-cli] %(message)s',
+            datefmt='%m/%d/%Y %H:%M:%S',
+            level=logging.INFO)
     loop = asyncio.get_event_loop()
     try:
         loop.create_task(run_web_server())
