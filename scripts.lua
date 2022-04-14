@@ -542,7 +542,7 @@ function gst_transcode_hls(src, copy, start, speed, width, height, fps, v_kbps, 
 
     cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, nil)
     if cmd then
-        hlscmd = string.format([[%s hlssink max-files=50 target-duration=15 playlist-length=5 \
+        hlscmd = string.format([[%s hlssink max-files=50 target-duration=5 playlist-length=1000 \
             playlist-location="%s" location="%s"]],
             cmd, fm38u, fsegment)
         return hlscmd, mime
@@ -640,7 +640,7 @@ end
 
 function test_one()
     fname = "/deepnas/home/U1000/avatar.mp4"
-    fname = "./samples/small.mp4"
+    fname = "/tmp/test.mkv"
     copy = false
     start = "00:00:00"
     speed = 1
@@ -649,10 +649,10 @@ function test_one()
     fps = 30
     vkbps = 400
     akbps = 60
-    cmd, mime = gst_transcode_hls(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/out.mp4")
+    cmd, mime = gst_transcode_hls(fname, copy, start, speed, width, height, fps, vkbps, akbps, "")
     print(cmd, mime)
-    --shexecute(cmd)
+    shexecute(cmd)
 end
 
 --test_files()
-test_one()
+--test_one()

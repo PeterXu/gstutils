@@ -1,0 +1,20 @@
+<html>
+    <head>
+        <title>streaming testing</title>
+        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    </head>
+    <body>
+        <video id="video" rc="/test.mkv/index.m38u" controls></video>
+        <script>
+            var video = document.getElementById('video');
+            var videoSrc = '/test.mkv/index.m38u';
+            if (Hls.isSupported()) {
+                var hls = new Hls();
+                hls.loadSource(videoSrc);
+                hls.attachMedia(video);
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = videoSrc;
+            }
+        </script>
+    </body>
+</html>

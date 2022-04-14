@@ -104,6 +104,13 @@ def gst_discover_info(fname):
     shbin = "gst-discoverer-1.0 -v %s" % fname
     lines = os.popen(shbin)
     for line in lines:
+        #print(line)
+        pos = line.find("Duration: ")
+        if pos != -1:
+            items = line[pos+10:].split(".")[0].split(":")
+            if len(items) == 3:
+                duration = int(items[0])*3600 + int(items[1])*60 + int(items[2])
+                print(line, duration)
         ret = gst_parse_props(line, "container:")
         if not ret: 
             ret = gst_parse_props(line, "unknown:")
@@ -166,6 +173,7 @@ class Transcoder(object):
             return
         print(">media:\n", info)
         print(">video:", self.video_fps, self.video_width, self.video_height)
+        return
 
         mux = gst_make_mux_profile(self.mtype)
         avc = gst_make_h264_enc_profile(1024)

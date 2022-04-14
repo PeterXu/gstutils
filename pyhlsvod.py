@@ -102,7 +102,12 @@ def gst_discover_info(fname):
     shbin = "gst-discoverer-1.0 -v %s" % fname
     lines = os.popen(shbin)
     for line in lines:
-        if line.find("container:") >= 0:
+        if line.find("Duration: ") >= 0:
+            pos = line.find("Duration: ")
+            items = line[pos+10:].split(".")[0].split(":")
+            if len(items) == 3:
+                info["duration"] = int(items[0])*3600 + int(items[1])*60 + int(items[2])
+        elif line.find("container:") >= 0:
             info["mux"] = gst_parse_props(line, "container:")
         elif line.find("unknown:") >= 0: 
             info["mux"] = gst_parse_props(line, "unknown:")
@@ -135,6 +140,7 @@ class Transcoder(object):
     def __init__(self):
         self.loop = None
         self.pipeline = None
+        self.duration = 0
         self.video_fps = 0
         self.video_width = 0
         self.video_height = 0
@@ -143,6 +149,9 @@ class Transcoder(object):
     def do_work(self, infile, outfile, outcaps, akbps, vkbps):
         info = gst_discover_info(infile)
         if not info: return
+        self.duration = info["duration"]
+        if self.duration == None:
+            return
         self.video_fps = gst_parse_value(info["video"]["more"]["framerate"])
         self.video_width = gst_parse_value(info["video"]["more"]["width"])
         self.video_height = gst_parse_value(info["video"]["more"]["height"])
@@ -365,8 +374,10 @@ class MyHTTPRequestHandler:
         '.md': 'text/markdown',
         '.mp4': 'video/mp4',
         '.mov': 'video/quicktime',
-        '.ts': 'video/mpegts',        #video/MP2T
-        '.m38u': 'application/x-hls', #application/x-mpegURL
+        #'.ts': 'video/mpegts',
+        '.ts': 'video/MP2T',
+        #'.m38u': 'application/x-hls',
+        '.m38u': 'application/x-mpegURL',
         '.sh': "text/html",
     }
 
@@ -416,6 +427,7 @@ class MyHTTPRequestHandler:
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlspath + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         value = self.translate_path(uri)
+        logging.info("check_hls begin uri: %s", uri)
 
         ## check cur-path default
         path = os.path.join(self.curpath, value)
@@ -434,7 +446,7 @@ class MyHTTPRequestHandler:
 
         ## check hls extensions
         parts = os.path.splitext(path)
-        if not self.support_exts.get(parts[0]):
+        if not self.support_exts.get(parts[1]):
             if os.path.exists(path):
                 return self.send_static(path, headers)
             return web.HTTPNotFound(reason="File not found")
@@ -443,20 +455,25 @@ class MyHTTPRequestHandler:
         ## check m38u file(step1/step2)
         ## wait m38u update if not modified
         if os.path.basename(value) == self.hlsindex:
-            if value.find("%s/" % self.hlskey) != 0: 
-                path = "%s/%s" % (self.hlskey, value) 
-                return web.HTTPMovedPermanently(location=path)
-            path = os.path.join(self.hlspath, value)
+            pos = value.find("%s/" % self.hlskey)
+            if pos != 0: 
+                path = os.path.join(self.hlskey, value)
+                path = os.path.join("/", path)
+                logging.info("check_hls redirect: %s", path)
+                return web.HTTPPermanentRedirect(location=path)
+            path = value[len(self.hlskey)+1:]
+            path = os.path.join(self.hlspath, path)
             err, mtime = self.read_mtime(path)
             if err != None or not self.check_modified(mtime, headers):
                 #TODO:
                 pass
+            logging.info("check_hls m38u file: %s", path)
             return self.send_static(path, headers)
 
         ## check segement file
         ## wait segment update if not exist
-        if value.find("%s/" % hls_key) == 0:
-            segment = value[len(hls_key)+1:]
+        if value.find("%s/" % self.hlskey) == 0:
+            segment = value[len(self.hlskey)+1:]
             path = os.path.join(self.hlspath, segment)
             if not os.path.exists(path):
                 pos = segment.rfind("/")
@@ -466,18 +483,19 @@ class MyHTTPRequestHandler:
                     return web.HTTPNotFound(reason="File not found")
                 #TODO:
                 pass
+            #logging.info("check_hls ts file:%s", path)
             return self.send_static(path, headers)
         return web.HTTPBadRequest()
 
     async def do_File(self, request):
-        logging.info("do_File begin")
+        #logging.info("do_File begin")
         try:
             headers = request.headers
             uri = request.match_info["uri"]
         except:
             uri = ""
         resp = await self.check_hls(uri, headers)
-        print(uri, resp)
+        #print(uri, resp)
         return resp
 
     def send_static(self, path, headers):
@@ -620,9 +638,7 @@ async def run_web_server():
     handler = MyHTTPRequestHandler()
     app = web.Application(middlewares=[])
     app.add_routes([
-        web.get('/', handler.do_File),
-        web.get('/{uri}', handler.do_File),
-        web.get('/{uri}/', handler.do_File),
+        web.get(r'/{uri:.*}', handler.do_File),
         ])
     runner = web.AppRunner(app)
     await runner.setup()
