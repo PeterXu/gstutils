@@ -42,6 +42,9 @@ def gst_make_elem(name, props={}, alias=None):
     if elem and props:
         for k,v in props.items(): elem.set_property(k, v)
     return elem
+def gst_add_elems(pipeline, elems=[]):
+    for e in elems:
+        if e: pipeline.add(e)
 def gst_link_elems(elems, dst=None):
     last = None
     for e in elems:
@@ -83,6 +86,7 @@ def gst_make_aac_enc_profile(kbps):
     enc = gst_check_elem("avenc_aac")
     if not enc: return "audio/mpeg"
     return "%s,bitrate=%s" % (enc, bps)
+
 def gst_parse_props(line, key):
     if line.find(key) == -1: return {}
     ret = re.search("%s ([\w/-]+)[,]*(.*)" % key, line)
@@ -118,6 +122,7 @@ def gst_discover_info(fname):
     #print(info)
     return info
 def gst_parse_value(item):
+    if not item: return None
     ret = re.search("\((.*)\)(.*)", item)
     if not ret or len(ret.groups()) <= 1: return None
     stype, sval = ret.groups()[0:2]
@@ -132,9 +137,67 @@ def gst_parse_value(item):
     elif stype == "boolean":
         return sval == "true"
     return sval
-def gst_add_elems(pipeline, elems=[]):
-    for e in elems:
-        if e: pipeline.add(e)
+
+class MediaInfo(object):
+    def __init__(self):
+        self.infile = ''
+        self.info = {}
+
+    def duration(self):
+        try: value = self.info.get("duration")
+        except: return 0
+        return value
+
+    def mediaType(self, kind): #mux/audio/video
+        try: mtype = self.info.get(kind).get("type")
+        except: return None
+        return mtype
+
+    def hasAudio(self):
+        return self.mediaType("audio") != None
+
+    def hasVideo(self):
+        return self.mediaType("video") != None
+
+    def frameRate(self):
+        try: value = self.info.get("video").get("more").get("framerate")
+        except: return 0
+        return gst_parse_value(value)
+
+    def width(self):
+        try: value = self.info.get("video").get("more").get("width")
+        except: return 0
+        return gst_parse_value(value)
+
+    def height(self):
+        try: value = self.info.get("video").get("more").get("height")
+        except: return 0
+        return gst_parse_value(value)
+
+    def isWebDirectSupport(self):
+        mux = self.mediaType("mux")
+        if mux == "video/quicktime" or mux == "application/x-3gp" or mux == "audio/x-m4a":
+            audio = self.mediaType("audio")
+            video = self.mediaType("video")
+            if audio != None and audio != "audio/mpeg": return False
+            if video != None and video != "video/x-h264": return False 
+            return True
+        return False
+
+    def parse(self, infile):
+        info = gst_discover_info(infile)
+        if not info: return False
+        self.infile = infile
+        self.info = info
+        if self.duration() == 0:
+            return False
+        if self.hasVideo():
+            if self.frameRate() == 0 or self.width() == 0 or self.height() == 0:
+                return False
+        logging.info(["coder media:", "\n", info])
+        logging.info(["coder video:", video_fps, video_width, video_height])
+        return True
+
 
 class Transcoder(object):
     def __init__(self):
@@ -147,18 +210,6 @@ class Transcoder(object):
         pass
 
     def do_work(self, infile, outfile, outcaps, akbps, vkbps):
-        info = gst_discover_info(infile)
-        if not info: return
-        self.duration = info["duration"]
-        if self.duration == None:
-            return
-        self.video_fps = gst_parse_value(info["video"]["more"]["framerate"])
-        self.video_width = gst_parse_value(info["video"]["more"]["width"])
-        self.video_height = gst_parse_value(info["video"]["more"]["height"])
-        if self.video_fps == None or self.video_width == None or self.video_height == None:
-            return
-        logging.info(["coder media:", "\n", info])
-        logging.info(["coder video:", self.video_fps, self.video_width, self.video_height])
 
         mux = gst_make_mux_profile(outcaps)
         aac = gst_make_aac_enc_profile(akbps)
@@ -457,9 +508,21 @@ class MyHTTPRequestHandler:
         if os.path.basename(value) == self.hlsindex:
             pos = value.find("%s/" % self.hlskey)
             if pos != 0: 
+                pos = value.rfind("/")
+                source = value[:pos]
+                srcpath = os.path.join(self.directory, source)
+                logging.info("check_hls default m38u: %s - %s", path, source)
+                #-- check source info
+                if not os.path.exists(srcpath) or not os.path.isfile(srcpath):
+                    return web.HTTPNotFound(reason="File not found")
+                minfo = MediaInfo()
+                if not minfo.parse(srcpath):
+                    return web.HTTPUnsupportedMediaType()
+                if minfo.isWebDirectSupport():
+                    return web.HTTPPermanentRedirect(location=source)
+                #-- redirect
                 path = os.path.join(self.hlskey, value)
                 path = os.path.join("/", path)
-                logging.info("check_hls redirect: %s", path)
                 return web.HTTPPermanentRedirect(location=path)
             path = value[len(self.hlskey)+1:]
             path = os.path.join(self.hlspath, path)
@@ -467,7 +530,7 @@ class MyHTTPRequestHandler:
             if err != None or not self.check_modified(mtime, headers):
                 #TODO:
                 pass
-            logging.info("check_hls m38u file: %s", path)
+            logging.info("check_hls updated m38u: %s", path)
             return self.send_static(path, headers)
 
         ## check segement file
@@ -540,6 +603,12 @@ class MyHTTPRequestHandler:
                 return last_modif > ims
         return True
 
+    def parse_dirname(self, path):
+        if path.endswith('/'):
+            return os.path.dirname(path[:len(path)-1])
+        else:
+            return os.path.dirname(path)
+
     def list_directory(self, curr, path):
         try:
             list = os.listdir(path)
@@ -548,9 +617,9 @@ class MyHTTPRequestHandler:
         list.sort(key=lambda a: a.lower())
         r = []
         try:
-            displaypath = urllib.parse.unquote(path, errors='surrogatepass')
+            displaypath = urllib.parse.unquote(curr, errors='surrogatepass')
         except UnicodeDecodeError:
-            displaypath = urllib.parse.unquote(path)
+            displaypath = urllib.parse.unquote(curr)
         displaypath = html.escape(displaypath, quote=False)
         enc = sys.getfilesystemencoding()
         title = 'Directory listing for %s' % displaypath
@@ -565,16 +634,16 @@ class MyHTTPRequestHandler:
 
         if len(curr) > 0:
             displayname = ".."
-            linkname = os.path.dirname(curr)
+            linkname = self.parse_dirname(curr)
             if len(linkname) == 0: linkname = "/"
             r.append('<li><a href="%s">%s</a></li>'
                     % (urllib.parse.quote(linkname, errors='surrogatepass'),
                        html.escape(displayname, quote=False)))
         for name in list:
-            fullname = os.path.join(path, name)
             displayname = name
-            linkname = curr + "/" + name
+            linkname = name
             # Append / for directories or @ for symbolic links
+            fullname = os.path.join(path, name)
             if os.path.isdir(fullname):
                 displayname = name + "/"
                 linkname = linkname + "/"

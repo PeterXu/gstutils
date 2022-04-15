@@ -110,7 +110,7 @@ def gst_discover_info(fname):
             items = line[pos+10:].split(".")[0].split(":")
             if len(items) == 3:
                 duration = int(items[0])*3600 + int(items[1])*60 + int(items[2])
-                print(line, duration)
+                info["duration"] = duration
         ret = gst_parse_props(line, "container:")
         if not ret: 
             ret = gst_parse_props(line, "unknown:")
