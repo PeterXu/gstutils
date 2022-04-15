@@ -139,20 +139,77 @@ def gst_parse_value(item):
         return sval == "true"
     return sval
 
+class MediaExtm3u(object):
+    def __init__(self):
+        self.fp = None
+        self.last_seq = 0
+        self.is_begin = False
+        self.is_end = False
+        pass
+    def open(self, fname, is_parse=False):
+        if is_parse: mode = "rb"
+        else: mode = "wb+";
+        self.fname = fname
+        self.fp = open(fname, mode)
+        if not self.fp:
+            return False
+        last_inf = False
+        for line in self.fp.readlines():
+            if line.find("#EXTM3U") == 0:
+                self.is_begin = True
+            elif line.find("#EXT-X-ENDLIST") == 0:
+                self.is_end = True
+            elif line.find("#EXTINF:") == 0:
+                last_inf = True
+                continue
+            if last_inf:
+                last_inf = False
+                try:
+                    result = re.search(".*segment_(\d+).ts", line)
+                    self.last_seq = int(result.groups()[0])
+                except:
+                    return False
+        if not self.is_begin and self.is_end:
+            return False
+        return True
+    def next_name(self):
+        self.last_seq += 1
+        return "hls_segment_%06d.ts" % self.last_seq
+    def begin(self, fname, second):
+        if self.is_begin: return False
+        fp = self.fp
+        fp.write("#EXTM3U\n")
+        fp.write("#EXT-X-VERSION:3\n")
+        fp.write("#EXT-X-ALLOW-CACHE:NO\n")
+        fp.write("#EXT-X-MEDIA-SEQUENCE:0\n")
+        fp.write("#EXT-X-TARGETDURATION:%d\n" % second)
+        fp.write("\n")
+        return True
+    def add(self, second, segment):
+        if self.is_end: return False
+        self.fp.write("#EXTINF:%d,\n" % second)
+        self.fp.write("%s\n" % segment)
+        return True
+    def end(self):
+        if self.is_end: return False
+        self.fp.write("#EXT-X-ENDLIST")
+        return True
+    def close(self):
+        self.fp.close()
+
+
 class MediaInfo(object):
     def __init__(self):
         self.infile = ''
         self.info = {}
 
     def duration(self):
-        try: value = self.info.get("duration")
+        try: return self.info.get("duration")
         except: return 0
-        return value
 
     def mediaType(self, kind): #mux/audio/video
-        try: mtype = self.info.get(kind).get("type")
+        try: return self.info.get(kind).get("type")
         except: return None
-        return mtype
 
     def hasAudio(self):
         return self.mediaType("audio") != None
@@ -192,14 +249,14 @@ class MediaInfo(object):
         self.info = info
         if self.duration() == 0:
             return False
+        logging.info(["coder media:", "\n", info])
         if self.hasVideo():
             fps = self.frameRate()
             width = self.width()
             height = self.height()
             if fps == 0 or width == 0 or height == 0:
                 return False
-        logging.info(["coder media:", "\n", info])
-        logging.info(["coder video:", fps, width, height])
+            logging.info(["coder video:", fps, width, height])
         return True
 
 
@@ -214,7 +271,6 @@ class Transcoder(object):
         pass
 
     def do_work(self, infile, outfile, outcaps, akbps, vkbps):
-
         mux = gst_make_mux_profile(outcaps)
         aac = gst_make_aac_enc_profile(akbps)
         avc = gst_make_h264_enc_profile(vkbps)
@@ -355,7 +411,7 @@ class HlsClient:
         self.alive = True
         self.conn = conn
         self.child = child
-        self.sname = None
+        self.source = None
 
     def set_alive(self, state):
         self.mutex.acquire()
@@ -456,22 +512,22 @@ class MyHTTPRequestHandler:
                 items.append(createHls())
         self.services = items
     def init_services(self):
-        items.append(createHls())
+        #items.append(createHls())
         items.append(createHls())
         self.services = items
-    def get_service(self, sname):
+    def get_service(self, name):
         for item in self.services:
-            if item.sname == sname:
+            if item.source == name:
                 return item
         for item in self.services:
-            if not item.sname:
+            if not item.source:
+                item.source = name
                 return item
         return None
-    def notify_service(self, sname):
-        cli = self.get_service(sname)
+    def notify_service(self, name, data):
+        cli = self.get_service(name)
         if cli:
-            cli.post_message({"type":"sname", "data":sname})
-        if cli:
+            cli.post_message({"type":"source", "source":name, "data": data})
             return True
         return False
 
@@ -507,13 +563,16 @@ class MyHTTPRequestHandler:
         ## check m38u file(step1/step2)
         ## wait m38u update if not modified
         if os.path.basename(path) == self.hlsindex:
+            #-- parse source
+            pos = path.rfind("/")
+            if pos == -1:
+                return web.HTTPBadRequest()
+            source = path[:pos]
+            src_fpath = os.path.join(self.workdir, source)
+            dst_fpath = os.path.join(self.hlsdir, source)
+
             pos = path.find("%s/" % self.hlskey)
             if pos != 0: # no hlskey
-                pos = path.rfind("/")
-                if pos == -1:
-                    return web.HTTPBadRequest()
-                source = path[:pos]
-                src_fpath = os.path.join(self.workdir, source)
                 logging.info("check_hls m38u source: %s", source)
                 #-- check source info
                 if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
@@ -525,17 +584,26 @@ class MyHTTPRequestHandler:
                     source = os.path.join("/", source)
                     logging.info("check_hls m38u to source: %s", source)
                     return web.HTTPTemporaryRedirect(location=source)
+
+                #TODO:
+                bret = self.notify_service(source, {"src": src_fpath, "dst": dst_fpath})
+                if not bret:
+                    logging.info("check_hls m38u notify failed: %s", source)
+                    #if not bret: return web.HTTPTooManyRequests()
+
                 #-- redirect
                 path2 = os.path.join(self.hlskey, path)
                 path2 = os.path.join("/", path2)
                 logging.info("check_hls m38u to redirect: %s", path2)
-                #return web.HTTPTemporaryRedirect(location=path2)
-                return web.HTTPPermanentRedirect(location=path2)
+                return web.HTTPTemporaryRedirect(location=path2)
+
             m38u = path[len(self.hlskey)+1:]
             m38u_fpath = os.path.join(self.hlsdir, m38u)
             err, mtime = self.read_mtime(m38u_fpath)
             if err != None or not self.check_modified(mtime, headers):
                 #TODO:
+                bret = self.notify_service(source, {"src": src_fpath, "dst": dst_fpath})
+                #if not bret: return web.HTTPTooManyRequests()
                 pass
             logging.info("check_hls updated m38u: %s", m38u_fpath)
             return self.send_static(m38u_fpath, headers)
@@ -545,13 +613,19 @@ class MyHTTPRequestHandler:
         if path.find("%s/" % self.hlskey) == 0:
             segment = path[len(self.hlskey)+1:]
             seg_fpath = os.path.join(self.hlsdir, segment)
+
+            #-- parse source
+            pos = segment.rfind("/")
+            source = segment[:pos]
+            src_fpath = os.path.join(self.workdir, source)
+            dst_fpath = os.path.join(self.hlsdir, source)
+
             if not os.path.exists(seg_fpath):
-                pos = segment.rfind("/")
-                source = segment[:pos]
-                src_fpath = os.path.join(self.workdir, source)
                 if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                     return web.HTTPNotFound(reason="File not found")
                 #TODO:
+                bret = self.notify_service(source, {"src": src_fpath, "dst": dst_fpath})
+                #if not bret: return web.HTTPTooManyRequests()
                 pass
             #logging.info("check_hls ts file:%s", seg_fpath)
             return self.send_static(seg_fpath, headers)
