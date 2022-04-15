@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import re
 import copy
 import time
 import select
@@ -192,10 +193,13 @@ class MediaInfo(object):
         if self.duration() == 0:
             return False
         if self.hasVideo():
-            if self.frameRate() == 0 or self.width() == 0 or self.height() == 0:
+            fps = self.frameRate()
+            width = self.width()
+            height = self.height()
+            if fps == 0 or width == 0 or height == 0:
                 return False
         logging.info(["coder media:", "\n", info])
-        logging.info(["coder video:", video_fps, video_width, video_height])
+        logging.info(["coder video:", fps, width, height])
         return True
 
 
@@ -432,11 +436,11 @@ class MyHTTPRequestHandler:
         '.sh': "text/html",
     }
 
-    def __init__(self, curpath=None):
-        if curpath is None:
-             curpath = os.getcwd()
-        self.curpath = os.fspath(curpath)
-        self.hlspath = "/tmp/cached"
+    def __init__(self, directory=None):
+        if directory is None:
+             directory = os.getcwd()
+        self.workdir = os.fspath(directory)
+        self.hlsdir = "/tmp/cached"
         self.hlskey = "hlsvod"
         self.hlsindex = "index.m38u"
         self.services = []
@@ -474,80 +478,83 @@ class MyHTTPRequestHandler:
     # hls-play step: origin is "http://../source.mkv", source.mkv(file) is in self.directory
     # step0: access "http://../source.mkv/index.m38u", this is tempory url.
     # step1: redirect to "http://../hlsvod/source.mkv/index.m38u",
-    # step2: access "http://../hlsvod/source.mkv/index.m38u", self.hlspath + source.mkv(dir) + index.m38u
-    # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlspath + source.mkv(dir) + segement.ts
+    # step2: access "http://../hlsvod/source.mkv/index.m38u", self.hlsdir + source.mkv(dir) + index.m38u
+    # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
-        value = self.translate_path(uri)
-        logging.info("check_hls begin uri: %s", uri)
+        path = self.translate_path(uri)
+        logging.info("check_hls begin: %s", path)
 
-        ## check cur-path default
-        path = os.path.join(self.curpath, value)
-        if os.path.isdir(path):
+        ## check workdir default
+        fpath = os.path.join(self.workdir, path)
+        if os.path.isdir(fpath):
             for index in "index.html", "index.htm":
-                index = os.path.join(path, index)
+                index = os.path.join(fpath, index)
                 if os.path.exists(index):
-                    path = index
+                    fpath = index
                     break
             else:
-                return self.list_directory(value, path)
-        if path.endswith("/"):
+                return self.list_directory(path, fpath)
+        if fpath.endswith("/"):
             return web.HTTPNotFound(reason="File not found")
-        if os.path.isfile(path):
-            return self.send_static(path, headers)
+        if os.path.isfile(fpath):
+            return self.send_static(fpath, headers)
 
         ## check hls extensions
-        parts = os.path.splitext(path)
+        parts = os.path.splitext(fpath)
         if not self.support_exts.get(parts[1]):
-            if os.path.exists(path):
-                return self.send_static(path, headers)
             return web.HTTPNotFound(reason="File not found")
-
 
         ## check m38u file(step1/step2)
         ## wait m38u update if not modified
-        if os.path.basename(value) == self.hlsindex:
-            pos = value.find("%s/" % self.hlskey)
-            if pos != 0: 
-                pos = value.rfind("/")
-                source = value[:pos]
-                srcpath = os.path.join(self.directory, source)
-                logging.info("check_hls default m38u: %s - %s", path, source)
+        if os.path.basename(path) == self.hlsindex:
+            pos = path.find("%s/" % self.hlskey)
+            if pos != 0: # no hlskey
+                pos = path.rfind("/")
+                if pos == -1:
+                    return web.HTTPBadRequest()
+                source = path[:pos]
+                src_fpath = os.path.join(self.workdir, source)
+                logging.info("check_hls m38u source: %s", source)
                 #-- check source info
-                if not os.path.exists(srcpath) or not os.path.isfile(srcpath):
+                if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                     return web.HTTPNotFound(reason="File not found")
                 minfo = MediaInfo()
-                if not minfo.parse(srcpath):
+                if not minfo.parse(src_fpath):
                     return web.HTTPUnsupportedMediaType()
                 if minfo.isWebDirectSupport():
-                    return web.HTTPPermanentRedirect(location=source)
+                    source = os.path.join("/", source)
+                    logging.info("check_hls m38u to source: %s", source)
+                    return web.HTTPTemporaryRedirect(location=source)
                 #-- redirect
-                path = os.path.join(self.hlskey, value)
-                path = os.path.join("/", path)
-                return web.HTTPPermanentRedirect(location=path)
-            path = value[len(self.hlskey)+1:]
-            path = os.path.join(self.hlspath, path)
-            err, mtime = self.read_mtime(path)
+                path2 = os.path.join(self.hlskey, path)
+                path2 = os.path.join("/", path2)
+                logging.info("check_hls m38u to redirect: %s", path2)
+                #return web.HTTPTemporaryRedirect(location=path2)
+                return web.HTTPPermanentRedirect(location=path2)
+            m38u = path[len(self.hlskey)+1:]
+            m38u_fpath = os.path.join(self.hlsdir, m38u)
+            err, mtime = self.read_mtime(m38u_fpath)
             if err != None or not self.check_modified(mtime, headers):
                 #TODO:
                 pass
-            logging.info("check_hls updated m38u: %s", path)
-            return self.send_static(path, headers)
+            logging.info("check_hls updated m38u: %s", m38u_fpath)
+            return self.send_static(m38u_fpath, headers)
 
         ## check segement file
         ## wait segment update if not exist
-        if value.find("%s/" % self.hlskey) == 0:
-            segment = value[len(self.hlskey)+1:]
-            path = os.path.join(self.hlspath, segment)
-            if not os.path.exists(path):
+        if path.find("%s/" % self.hlskey) == 0:
+            segment = path[len(self.hlskey)+1:]
+            seg_fpath = os.path.join(self.hlsdir, segment)
+            if not os.path.exists(seg_fpath):
                 pos = segment.rfind("/")
                 source = segment[:pos]
-                srcpath = os.path.join(self.directory, source)
-                if not os.path.exists(srcpath) or not os.path.isfile(srcpath):
+                src_fpath = os.path.join(self.workdir, source)
+                if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                     return web.HTTPNotFound(reason="File not found")
                 #TODO:
                 pass
-            #logging.info("check_hls ts file:%s", path)
-            return self.send_static(path, headers)
+            #logging.info("check_hls ts file:%s", seg_fpath)
+            return self.send_static(seg_fpath, headers)
         return web.HTTPBadRequest()
 
     async def do_File(self, request):
@@ -561,21 +568,21 @@ class MyHTTPRequestHandler:
         #print(uri, resp)
         return resp
 
-    def send_static(self, path, headers):
-        err, mtime = self.read_mtime(path)
+    def send_static(self, fpath, headers):
+        err, mtime = self.read_mtime(fpath)
         if err: return err
         if not self.check_modified(mtime, headers):
             return web.HTTPNotModified()
         headers2 = {}
-        headers2["Content-type"] = self.guess_type(path)
+        headers2["Content-type"] = self.guess_type(fpath)
         headers2["Last-Modified"] = self.date_time_string(mtime)
-        return web.FileResponse(path=path, headers=headers2, status=200)
+        return web.FileResponse(path=fpath, headers=headers2, status=200)
 
-    def read_mtime(self, path):
-        if not os.path.isfile(path):
+    def read_mtime(self, fpath):
+        if not os.path.isfile(fpath):
             return web.HTTPNotFound(reason="File not found"), None
         try:
-            f = open(path, 'rb')
+            f = open(fpath, 'rb')
         except OSError:
             return web.HTTPNotFound(reason="File not found"), None
         try:
@@ -609,17 +616,17 @@ class MyHTTPRequestHandler:
         else:
             return os.path.dirname(path)
 
-    def list_directory(self, curr, path):
+    def list_directory(self, path, fpath):
         try:
-            list = os.listdir(path)
+            list = os.listdir(fpath)
         except OSError:
             return web.HTTPNotFound(reason="No permission to list directory")
         list.sort(key=lambda a: a.lower())
         r = []
         try:
-            displaypath = urllib.parse.unquote(curr, errors='surrogatepass')
+            displaypath = urllib.parse.unquote(path, errors='surrogatepass')
         except UnicodeDecodeError:
-            displaypath = urllib.parse.unquote(curr)
+            displaypath = urllib.parse.unquote(path)
         displaypath = html.escape(displaypath, quote=False)
         enc = sys.getfilesystemencoding()
         title = 'Directory listing for %s' % displaypath
@@ -632,18 +639,21 @@ class MyHTTPRequestHandler:
         r.append('<body>\n<h1>%s</h1>' % title)
         r.append('<hr>\n<ul>')
 
-        if len(curr) > 0:
+        if len(path) > 0:
             displayname = ".."
-            linkname = self.parse_dirname(curr)
-            if len(linkname) == 0: linkname = "/"
+            linkname = self.parse_dirname(path)
+            linkname = os.path.join("/", linkname)
             r.append('<li><a href="%s">%s</a></li>'
                     % (urllib.parse.quote(linkname, errors='surrogatepass'),
                        html.escape(displayname, quote=False)))
         for name in list:
             displayname = name
             linkname = name
+            if not path.endswith('/'):
+                linkname = os.path.join(path, name)
+                linkname = os.path.join("/", linkname)
             # Append / for directories or @ for symbolic links
-            fullname = os.path.join(path, name)
+            fullname = os.path.join(fpath, name)
             if os.path.isdir(fullname):
                 displayname = name + "/"
                 linkname = linkname + "/"
@@ -659,17 +669,17 @@ class MyHTTPRequestHandler:
         headers["Content-type"] = "text/html; charset=%s" % enc
         return web.Response(body=encoded, headers=headers)
 
-    def translate_path(self, path):
+    def translate_path(self, uri):
         # abandon query parameters
-        path = path.split('?',1)[0]
-        path = path.split('#',1)[0]
+        uri = uri.split('?',1)[0]
+        uri = uri.split('#',1)[0]
         # Don't forget explicit trailing slash when normalizing. Issue17324
-        trailing_slash = path.rstrip().endswith('/')
+        trailing_slash = uri.rstrip().endswith('/')
         try:
-            path = urllib.parse.unquote(path, errors='surrogatepass')
+            uri = urllib.parse.unquote(uri, errors='surrogatepass')
         except UnicodeDecodeError:
-            path = urllib.parse.unquote(path)
-        path = posixpath.normpath(path)
+            uri = urllib.parse.unquote(uri)
+        path = posixpath.normpath(uri)
         words = path.split('/')
         words = filter(None, words)
         path = ""
@@ -685,14 +695,14 @@ class MyHTTPRequestHandler:
     def copyfile(self, source, outputfile):
         shutil.copyfileobj(source, outputfile)
 
-    def guess_type(self, path):
-        base, ext = posixpath.splitext(path)
+    def guess_type(self, fpath):
+        base, ext = posixpath.splitext(fpath)
         if ext in self.extensions_map:
             return self.extensions_map[ext]
         ext = ext.lower()
         if ext in self.extensions_map:
             return self.extensions_map[ext]
-        guess, _ = mimetypes.guess_type(path)
+        guess, _ = mimetypes.guess_type(fpath)
         if guess:
             return guess
         return 'application/octet-stream'
