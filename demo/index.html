@@ -4,17 +4,22 @@
         <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     </head>
     <body>
-        <video id="video" rc="/test.mkv/index.m38u" controls></video>
+        <video id="video" controls></video>
+        <button id="btnPlay">Play</button>
         <script>
-            var video = document.getElementById('video');
-            var videoSrc = '/test.mkv/index.m38u';
-            if (Hls.isSupported()) {
-                var hls = new Hls();
-                hls.loadSource(videoSrc);
-                hls.attachMedia(video);
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = videoSrc;
-            }
+            var play = document.getElementById('btnPlay');
+            play.onclick = function() {
+                var video = document.getElementById('video');
+                var videoSrc = '/samples/test.mkv/index.m38u';
+                if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = videoSrc;
+                } else if (Hls.isSupported()) {
+                    var hls = new Hls();
+                    hls.loadSource(videoSrc);
+                    hls.attachMedia(video);
+                }
+                video.play();
+            };
         </script>
     </body>
 </html>

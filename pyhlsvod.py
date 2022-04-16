@@ -263,27 +263,31 @@ class MediaInfo(object):
 class Transcoder(object):
     def __init__(self):
         self.working = 0
+        self.state = -1
         self.loop = None
         self.pipeline = None
+        self.start_pos = 0
+        self.buffer_count = 0
         pass
 
     def outdated(self):
         return self.working == -1
 
-    def do_hlsvod(self, infile, outpath):
+    def do_hlsvod(self, infile, outpath, start=0):
         outfile = os.path.join(outpath, "index.ts")
         playlist = os.path.join(outpath, "index.m38u")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
         options = {
-            "max-files": 1000,
+            "max-files": 1000000,
             "target-duration": 5,
-            "playlist-length": 1000,
-            "playlist-location=": playlist,
+            "playlist-length": 0,
+            "playlist-location": playlist,
             "location": segment,
         }
         sink = gst_make_elem("hlssink", options)
-        logging.info(["hlsvod: %s - %s" % (infile, outpath), sink])
-        #self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
+        logging.info(["coder hls: %s - %s" % (infile, outpath), sink])
+        self.start_pos = start
+        self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
 
     def do_work(self, infile, outfile, sink, outcaps, akbps, vkbps):
         self.working = 1
@@ -296,6 +300,12 @@ class Transcoder(object):
         source = gst_make_elem("filesrc", {"location": infile})
         transcode = gst_make_elem("transcodebin")
         Gst.util_set_object_arg(transcode, "profile", profile);
+        pad = transcode.get_static_pad("src")
+        if pad:
+            #ptype = Gst.PadProbeType.BUFFER
+            ptype = Gst.PadProbeType.BUFFER_LIST
+            ret = pad.add_probe(ptype, self.transcode_probe)
+            logging.info(["add probe", pad, ptype, ret])
         if not sink:
             sink = gst_make_elem("filesink", {"location": outfile})
         elems = [source, transcode, sink]
@@ -304,40 +314,58 @@ class Transcoder(object):
         gst_add_elems(self.pipeline, elems)
         gst_link_elems(elems)
         self.elems = elems
-
         self.check_run()
 
     def do_stop(self):
         if self.loop and self.pipeline:
             self.loop.quit()
 
-    def get_state(self):
+    def do_pause(self):
         if self.loop and self.pipeline:
-            return self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
-        return -1
+            self.pipeline.set_state(Gst.State.PAUSED)
+            self.state = int(Gst.State.PAUSED)
+
+    # VOID_PENDING:0, NULL:1, READY:2, PAUSED:3, PLAYING:4
+    def get_state(self):
+        return self.state
+
+    def transcode_probe(self, pad, info):
+        items = info.get_buffer_list()
+        if items:
+            self.buffer_count += items.length()
+        #logging.info(["probe", info, items.length()])
+        if self.buffer_count <= self.start_pos:
+            return Gst.PadProbeReturn.DROP
+        return Gst.PadProbeReturn.OK
 
     def check_run(self):
-        GLib.timeout_add(200, self.do_position)
-
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self.on_message)
 
         self.loop = GLib.MainLoop()
         ret = self.pipeline.set_state(Gst.State.PLAYING)
+        self.state = int(Gst.State.PLAYING)
         logging.info("coder run begin: %d", ret)
-        try: self.loop.run()
-        except: pass
-        logging.info("coder run end");
+        try:
+            self.loop.run()
+        except Exception as e:
+            logging.warning(["coder run error", e]);
+            pass
+        else:
+            logging.info("coder run end");
         self.pipeline.set_state(Gst.State.NULL)
+        self.state = int(Gst.State.NULL)
         self.working = -1
         pass
 
     def do_position(self):
-        ok, pos = self.pipeline.query_position(Gst.Format.TIME)
-        if ok:
-            value = float(pos) / Gst.SECOND
-            logging.info("coder position: %d - %f", pos, value)
+        st = self.get_state()
+        if st == int(Gst.State.PLAYING):
+            ok, pos = self.pipeline.query_position(Gst.Format.TIME)
+            if ok:
+                value = int(float(pos) / Gst.SECOND)
+                logging.info("coder state: %d, position: %d - %d", st, pos, value)
 
     def do_seek_steps(self, sink, steps):
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -369,8 +397,15 @@ class HlsService:
         pass
 
     def _loop(self, coder, fsrc, fdst):
-        logging.info("coder working...")
-        coder.do_hlsvod(fsrc, fdst)
+        try:
+            logging.info("coder working...")
+            coder.do_hlsvod(fsrc, fdst)
+        except Exception as e:
+            logging.warning(["coder working error", e])
+        except:
+            logging.warning("coder working other error")
+        else:
+            logging.info("coder working end")
 
     def get_coder(self):
         if self.coder and self.coder.outdated():
@@ -393,14 +428,13 @@ class HlsService:
     def start_coder(self, fsrc, fdst):
         self.last_time = get_now()
         self.coder = Transcoder()
-        thread.start_new_thread(self._loop, (coder, fsrc, fdst))
+        logging.info("coder start...")
+        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst))
+        logging.info("coder end...")
 
     def prepare_coder(self, source, fsrc, fdst):
         if not source or not fsrc or not fdst:
             logging.warning("invalid coder args")
-            return
-        if self.is_alive() and source != self.source:
-            logging.warning("another <%s> is working", self.source)
             return
         if not os.path.isfile(fsrc):
             logging.warning("<%s> not exist", fsrc)
@@ -411,10 +445,17 @@ class HlsService:
             if os.path.isfile(fdst):
                 logging.warning("<%s> should not be file", fdst)
                 return
+        if source == self.source:
+            return
+        if self.is_alive():
+            if source != self.source:
+                logging.warning("another <%s> is working", self.source)
+            else:
+                logging.info("<%s> is working and nop", source)
+            return
         self.source = source
         self.start_coder(fsrc, fdst)
         pass
-
 
     def on_message(self, msg):
         logging.info(["recv message: ", msg])
@@ -433,17 +474,27 @@ class HlsService:
     def run_forever(self):
         while True:
             try:
-                ret = self.conn.poll(1)
+                ret = self.conn.poll(0.1)
                 if ret:
                     msg = self.conn.recv()
                     self.on_message(msg)
-            except:
-                logging.warning("poll err and quit")
+            except Exception as e:
+                logging.warning(["poll err and quit", e])
                 break
-            if self.is_alive():
-                if get_now() >= self.last_time + 10*1000:
-                    logging.warning("coder timeout...")
-                    self.stop_coder()
+            except:
+                logging.warning("poll other err and quit")
+                break
+
+            try:
+                #logging.info("coder checking...")
+                #logging.info(["coder check alive:", self.is_alive()])
+                if self.is_alive():
+                    if get_now() >= self.last_time + 30*1000:
+                        logging.warning("coder timeout...")
+                        self.stop_coder()
+                    pass
+                pass
+            except:
                 pass
         self.stop_coder()
         time.sleep(1)
@@ -514,7 +565,8 @@ class HlsClient:
                 if ret:
                     msg = self.conn.recv()
                     self.on_message(msg)
-            except:
+            except Exception as e:
+                logging.warning(["hls-cli poll err:", e])
                 break
         pass
 
@@ -568,6 +620,7 @@ class HlsCenter:
         if cli:
             cli.source = name
             cli.post_message({"type":"source", "source":name, "data": data})
+            time.sleep(5)
             return True
         return False
 
@@ -712,15 +765,17 @@ class MyHTTPRequestHandler:
         return web.HTTPBadRequest()
 
     async def do_File(self, request):
-        #logging.info("do_File begin")
         try:
+            #logging.info("do_File begin")
             headers = request.headers
             uri = request.match_info["uri"]
-        except:
-            uri = ""
-        resp = await self.check_hls(uri, headers)
-        #print(uri, resp)
-        return resp
+        except Exception as e:
+            logging.warning(["do_File error:", e])
+            return web.HTTPBadRequest()
+        else:
+            resp = await self.check_hls(uri, headers)
+            #print(uri, resp)
+            return resp
 
     def send_static(self, fpath, headers):
         err, mtime = self.read_mtime(fpath)
@@ -745,7 +800,8 @@ class MyHTTPRequestHandler:
             rets[1] = fs.st_mtime
         except:
             rets[0] = web.HTTPInternalServerError()
-        f.close()
+        finally:
+            f.close()
         return rets[0], rets[1]
 
     def check_modified(self, mtime, headers):
@@ -898,9 +954,9 @@ def do_main():
         loop.run_forever()
     except:
         print()
-        logging.warning("interrupt and close")
+        logging.warning("quit for exception")
+    finally:
         handler.uninit()
-        pass
     print()
 
 if __name__ == "__main__":
