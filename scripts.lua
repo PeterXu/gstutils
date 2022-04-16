@@ -649,10 +649,10 @@ function test_one()
     fps = 30
     vkbps = 400
     akbps = 60
-    cmd, mime = gst_transcode_hls(fname, copy, start, speed, width, height, fps, vkbps, akbps, "")
+    cmd, mime = gst_transcode_hls(fname, copy, start, speed, width, height, fps, vkbps, akbps, "/tmp/test")
     print(cmd, mime)
-    shexecute(cmd)
+    --shexecute(cmd)
 end
 
 --test_files()
---test_one()
+test_one()

@@ -165,7 +165,7 @@ class MediaExtm3u(object):
             if last_inf:
                 last_inf = False
                 try:
-                    result = re.search(".*segment_(\d+).ts", line)
+                    result = re.search("hls_segment_(\d+).ts", line)
                     self.last_seq = int(result.groups()[0])
                 except:
                     return False
@@ -249,14 +249,14 @@ class MediaInfo(object):
         self.info = info
         if self.duration() == 0:
             return False
-        logging.info(["coder media:", "\n", info])
+        logging.info(["coder media:", info])
         if self.hasVideo():
             fps = self.frameRate()
             width = self.width()
             height = self.height()
             if fps == 0 or width == 0 or height == 0:
                 return False
-            logging.info(["coder video:", fps, width, height])
+            logging.info("coder video: %dx%d@%d", width, height, fps)
         return True
 
 
@@ -265,27 +265,39 @@ class Transcoder(object):
         self.working = 0
         self.loop = None
         self.pipeline = None
-        self.duration = 0
-        self.video_fps = 0
-        self.video_width = 0
-        self.video_height = 0
         pass
 
     def outdated(self):
         return self.working == -1
 
-    def do_work(self, infile, outfile, outcaps, akbps, vkbps):
+    def do_hlsvod(self, infile, outpath):
+        outfile = os.path.join(outpath, "index.ts")
+        playlist = os.path.join(outpath, "index.m38u")
+        segment = os.path.join(outpath, "hls_segment_%06d.ts")
+        options = {
+            "max-files": 1000,
+            "target-duration": 5,
+            "playlist-length": 1000,
+            "playlist-location=": playlist,
+            "location": segment,
+        }
+        sink = gst_make_elem("hlssink", options)
+        logging.info(["hlsvod: %s - %s" % (infile, outpath), sink])
+        #self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
+
+    def do_work(self, infile, outfile, sink, outcaps, akbps, vkbps):
         self.working = 1
         mux = gst_make_mux_profile(outcaps)
         aac = gst_make_aac_enc_profile(akbps)
         avc = gst_make_h264_enc_profile(vkbps)
         profile = "%s:%s:%s" % (mux, avc, aac)
-        logging.info(["coder profile:", profile])
+        logging.info("coder profile: %s", profile)
 
         source = gst_make_elem("filesrc", {"location": infile})
         transcode = gst_make_elem("transcodebin")
         Gst.util_set_object_arg(transcode, "profile", profile);
-        sink = gst_make_elem("filesink", {"location": outfile})
+        if not sink:
+            sink = gst_make_elem("filesink", {"location": outfile})
         elems = [source, transcode, sink]
 
         self.pipeline = Gst.Pipeline()
@@ -313,7 +325,7 @@ class Transcoder(object):
 
         self.loop = GLib.MainLoop()
         ret = self.pipeline.set_state(Gst.State.PLAYING)
-        logging.info(["coder run begin:", ret])
+        logging.info("coder run begin: %d", ret)
         try: self.loop.run()
         except: pass
         logging.info("coder run end");
@@ -325,7 +337,7 @@ class Transcoder(object):
         ok, pos = self.pipeline.query_position(Gst.Format.TIME)
         if ok:
             value = float(pos) / Gst.SECOND
-            logging.info(["coder position:", pos, value])
+            logging.info("coder position: %d - %f", pos, value)
 
     def do_seek_steps(self, sink, steps):
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -354,13 +366,11 @@ class HlsService:
         self.last_time = 0
         self.coder = None
         self.source = None
-        self.fsrc = None
-        self.fdst = None
         pass
 
-    def _loop(self, coder):
+    def _loop(self, coder, fsrc, fdst):
         logging.info("coder working...")
-        coder.do_work()
+        coder.do_hlsvod(fsrc, fdst)
 
     def get_coder(self):
         if self.coder and self.coder.outdated():
@@ -380,13 +390,34 @@ class HlsService:
             coder.do_stop()
             self.coder = None
 
-    def start_coder(self):
+    def start_coder(self, fsrc, fdst):
         self.last_time = get_now()
         self.coder = Transcoder()
-        thread.start_new_thread(self._loop, (coder))
+        thread.start_new_thread(self._loop, (coder, fsrc, fdst))
+
+    def prepare_coder(self, source, fsrc, fdst):
+        if not source or not fsrc or not fdst:
+            logging.warning("invalid coder args")
+            return
+        if self.is_alive() and source != self.source:
+            logging.warning("another <%s> is working", self.source)
+            return
+        if not os.path.isfile(fsrc):
+            logging.warning("<%s> not exist", fsrc)
+            return
+        if not os.path.exists(fdst):
+            os.makedirs(fdst, exist_ok=True)
+        else:
+            if os.path.isfile(fdst):
+                logging.warning("<%s> should not be file", fdst)
+                return
+        self.source = source
+        self.start_coder(fsrc, fdst)
+        pass
+
 
     def on_message(self, msg):
-        logging.info(msg)
+        logging.info(["recv message: ", msg])
         self.last_time = get_now()
         mtype = msg.get("type")
         if mtype == "status":
@@ -395,9 +426,7 @@ class HlsService:
             source = msg.get("source")
             data = msg.get("data")
             if data:
-                self.fsrc = data.get("src")
-                self.fdst = data.get("dst")
-                self.source = source
+                self.prepare_coder(source, data.get("src"), data.get("dst"))
             pass
         pass
 
