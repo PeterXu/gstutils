@@ -29,9 +29,20 @@ gi.require_version('GObject', '2.0')
 from gi.repository import Gst, GObject, GLib, GstPbutils
 
 
-def get_now():
+def nowtime(): #ms
     return int(time.time()*1000)
 
+def copyfile(source, dest):
+    shutil.copyfile(source, dest)
+
+def tonumber(val, default=None):
+    try:
+        ret = default
+        ret = int(val)
+    except: 
+        try: ret = float(val)
+        except: pass
+    return ret
 
 #======== gstreamer service
 Gst.init(None)
@@ -138,13 +149,31 @@ def gst_parse_value(item):
     elif stype == "boolean":
         return sval == "true"
     return sval
+def hls_parse_prop(line, default=None):
+    pos1 = line.find(":")
+    if pos1 < 0: return default
+    pos2 = line.find(",", pos1+1)
+    if pos2 >= 0:
+        val = line[pos1+1:pos2]
+    else:
+        val = line[pos1+1:]
+    return tonumber(val, default)
+def hls_parse_segment(line, default=None):
+    try:
+        result = re.search(".*_segment_(\d+).ts", line)
+        return int(result.groups()[0])
+    except:
+        return default
+
 
 from watchdog.observers import Observer
 from watchdog import events
 class MediaMonitor(events.FileSystemEventHandler):
     def __init__(self):
         self.observer = None
+        self.last_path = None
         self.last_lines = []
+        self.cb_changed = None
         pass
     def on_any_event(self, evt):
         #logging.info(["mon-any", evt, evt.src_path])
@@ -156,7 +185,7 @@ class MediaMonitor(events.FileSystemEventHandler):
     def check_modified(self, fname):
         if not os.path.isfile(fname): return
         if os.path.basename(fname) != "index.m38u": return
-        fp = open(fname, "rb")
+        fp = open(fname, "r")
         if not fp: return
         new_lines = fp.readlines()
         fp.close()
@@ -173,28 +202,32 @@ class MediaMonitor(events.FileSystemEventHandler):
                 theSame = True
                 for idx in range(old_number):
                     if lines[idx] != self.last_lines[idx]:
-                        tmpl = "%s" % lines[idx]
-                        if tmpl.find("#EXT-X-MEDIA-SEQUENCE") == -1:
+                        if lines[idx].find("#EXT-X-MEDIA-SEQUENCE") == -1:
                             theSame = False
                             break
                 if theSame:
                     result = new_lines[old_number:]
                 else:
                     result = new_lines
-        logging.info(["mon index.m38u changed:", len(self.last_lines), len(new_lines), result])
+        #logging.info(["mon index.m38u changed:", len(self.last_lines), len(new_lines), result])
         self.last_lines = new_lines
+        if self.cb_changed:
+            self.cb_changed(self.last_path, result)
         pass
-    def start(self, path):
+    def start(self, path, cb):
+        self.last_path = path
         self.last_lines = []
+        self.cb_changed = cb
         try:
             event_handler = self
             self.observer = Observer()
-            self.observer.schedule(event_handler, path, recursive=True)
+            self.observer.schedule(event_handler, path, recursive=False)
             self.observer.start()
         except:
-            self.stop_mon()
+            self.stop()
             pass
     def stop(self):
+        self.cb_changed = None
         if not self.observer: return
         try:
             self.observer.stop()
@@ -204,63 +237,126 @@ class MediaMonitor(events.FileSystemEventHandler):
             pass
         pass
 
-class MediaExtm3u(object):
+class MediaExtm38u(object):
     def __init__(self):
         self.fp = None
-        self.last_seq = 0
+        self.fpath = None
+        self.last_seq = -1
+        self.duration = 0
         self.is_begin = False
         self.is_end = False
-        pass
-    def open(self, fname, is_parse=False):
-        if is_parse: mode = "rb"
-        else: mode = "wb+";
-        self.fname = fname
-        self.fp = open(fname, mode)
+        self.probe_count = 0
+    def _init(self):
+        self.last_seq = -1
+        self.duration = 0
+        self.is_begin = False
+        self.is_end = False
+        self.probe_count = 0
+    def open(self, path, seconds, is_new=False):
+        if self.fp:
+            return False
+        if seconds <= 0:
+            return False
+        fp = None
+        fname = os.path.join(path, "index.m38u")
+        if not is_new and os.path.isfile(fname):
+            try:
+                fp = open(fname, "r+")
+                self._init()
+                if fp and not self._parse(fp.readlines(), seconds):
+                    logging.warning("extm3u: discard this m38u")
+                    fp.close()
+                    fp = None
+            except:
+                pass
+        if not fp:
+            try:
+                fp = open(fname, "w")
+                self._init()
+            except:
+                return False
+        self.fp = fp
+        self.fpath = path
+        return True
+    def write(self, name, seconds):
         if not self.fp:
             return False
-        last_inf = False
-        for line in self.fp.readlines():
+        if not self.is_begin:
+            self._add_begin(self.fp, self.duration)
+            self.is_begin = True
+        if self.is_end:
+            return False
+        self._add_one(self.fp, name, seconds)
+        self.fp.flush()
+    def next_name(self):
+        self.last_seq += 1
+        name = "hls_segment_%06d.ts" % self.last_seq
+        return name, os.path.join(self.fpath, name)
+    def close(self):
+        if self.fp:
+            self.fp.close()
+            self.fp = None
+    def closeEnd(self):
+        if self.fp:
+            self._add_end(self.fp)
+        self.close()
+    def _parse(self, lines, seconds):
+        isSeg = False
+        for line in lines:
             if line.find("#EXTM3U") == 0:
                 self.is_begin = True
             elif line.find("#EXT-X-ENDLIST") == 0:
                 self.is_end = True
+            elif line.find("#EXT-X-TARGETDURATION:") == 0:
+                self.duration = hls_parse_prop(line, 0)
             elif line.find("#EXTINF:") == 0:
-                last_inf = True
+                isSeg = True
                 continue
-            if last_inf:
-                last_inf = False
-                try:
-                    result = re.search("hls_segment_(\d+).ts", line)
-                    self.last_seq = int(result.groups()[0])
-                except:
+            elif line.find("#PROBE_COUNT:") == 0:
+                self.probe_count = hls_parse_prop(line, 0)
+            elif len(line.strip()) == 0 or line[0] == "#":
+                continue
+            if isSeg:
+                isSeg = False
+                seq = hls_parse_segment(line, None)
+                if seq == None:
+                    logging.warning("extm3u: invalid segment seq")
                     return False
-        if not self.is_begin and self.is_end:
+                if seq != 0 and seq != self.last_seq + 1:
+                    logging.warning("extm3u: segment seq not continous: %d", seq)
+                    return False
+                self.last_seq = seq
+        if not self.is_begin:
             return False
+        if self.duration != seconds:
+            logging.warning("extm3u: invalid duration and restart")
+            return False
+        if not self.is_end:
+            if self.probe_count > 0:
+                logging.info("extm3u: continue to last pos: %d", self.probe_count)
+                return True
+            return False
+        logging.info("extm3u: last ended and nop again!")
+        self.probe_count = 0
         return True
-    def next_name(self):
-        self.last_seq += 1
-        return "hls_segment_%06d.ts" % self.last_seq
-    def begin(self, fname, second):
-        if self.is_begin: return False
-        fp = self.fp
+    def _add_begin(self, fp, seconds):
         fp.write("#EXTM3U\n")
         fp.write("#EXT-X-VERSION:3\n")
         fp.write("#EXT-X-ALLOW-CACHE:NO\n")
         fp.write("#EXT-X-MEDIA-SEQUENCE:0\n")
-        fp.write("#EXT-X-TARGETDURATION:%d\n" % second)
+        fp.write("#EXT-X-TARGETDURATION:%d\n" % seconds)
         fp.write("\n")
         return True
-    def add(self, second, segment):
-        if self.is_end: return False
-        self.fp.write("#EXTINF:%d,\n" % second)
-        self.fp.write("%s\n" % segment)
+    def _add_one(self, fp, segment, seconds):
+        if type(seconds) == float:
+            fp.write("#EXTINF:%.2f,\n" % seconds)
+        else:
+            fp.write("#EXTINF:%d,\n" % int(seconds))
+        fp.write("%s\n" % segment)
         return True
-    def end(self):
-        if self.is_end: return False
-        self.fp.write("#EXT-X-ENDLIST")
+    def _add_end(self, fp):
+        fp.write("#EXT-X-ENDLIST")
         return True
-    def close(self):
-        self.fp.close()
 
 
 class MediaInfo(object):
@@ -327,16 +423,32 @@ class MediaInfo(object):
 
 class Transcoder(object):
     def __init__(self):
+        self.mutex = threading.Lock()
         self.working = 0
         self.state = -1
         self.loop = None
         self.pipeline = None
         self.start_pos = 0
-        self.buffer_count = 0
+        self.buffer_count = -1
         pass
 
     def outdated(self):
         return self.working == -1
+
+    def get_count(self):
+        self.mutex.acquire()
+        count = self.buffer_count
+        self.mutex.release()
+        return count
+
+    def set_count(self, count):
+        self.mutex.acquire()
+        if self.buffer_count == -1:
+            self.buffer_count = 0;
+        self.buffer_count += count
+        count2 = self.buffer_count
+        self.mutex.release()
+        return count2
 
     def do_hlsvod(self, infile, outpath, start=0):
         outfile = os.path.join(outpath, "index.ts")
@@ -352,6 +464,7 @@ class Transcoder(object):
         sink = gst_make_elem("hlssink", options)
         logging.info(["coder hls: %s - %s" % (infile, outpath), sink])
         self.start_pos = start
+        self.set_count(-1)
         self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
 
     def do_work(self, infile, outfile, sink, outcaps, akbps, vkbps):
@@ -396,11 +509,11 @@ class Transcoder(object):
 
     def transcode_probe(self, pad, info):
         items = info.get_buffer_list()
-        if items:
-            self.buffer_count += items.length()
         #logging.info(["probe", info, items.length()])
-        if self.buffer_count <= self.start_pos:
-            return Gst.PadProbeReturn.DROP
+        if items:
+            count = self.set_count(items.length())
+            if count <= self.start_pos:
+                return Gst.PadProbeReturn.DROP
         return Gst.PadProbeReturn.OK
 
     def check_run(self):
@@ -460,12 +573,13 @@ class HlsService:
         self.coder = None
         self.source = None
         self.monitor = MediaMonitor()
+        self.extm38u = MediaExtm38u()
         pass
 
-    def _loop(self, coder, fsrc, fdst):
+    def _loop(self, coder, fsrc, fdst, pos):
         try:
             logging.info("coder loop...")
-            coder.do_hlsvod(fsrc, fdst)
+            coder.do_hlsvod(fsrc, fdst, pos)
         except Exception as e:
             logging.warning(["coder loop error", e])
         except:
@@ -477,6 +591,11 @@ class HlsService:
         if self.coder and self.coder.outdated():
             self.coder = None
         return self.coder
+
+    def get_coding_count(self):
+        coder = self.get_coder()
+        if coder: return coder.get_count()
+        return -1
 
     def is_alive(self):
         coder = self.get_coder()
@@ -493,14 +612,55 @@ class HlsService:
         self.monitor.stop()
 
     def start_coder(self, fsrc, fdst):
-        self.monitor.stop()
-        self.monitor.start(fdst)
+        # final destination
+        if not self.extm38u.open(fdst, 5):
+            return False
+        fpos = self.extm38u.probe_count
 
-        self.last_time = get_now()
+        # tmp destination for transcoder
+        fdst_tmp = os.path.join(fdst, "cached");
+        if not os.path.exists(fdst_tmp):
+            os.makedirs(fdst_tmp, exist_ok=True)
+        self.monitor.stop()
+        self.monitor.start(fdst_tmp, self.index_changed)
+
+        self.last_time = nowtime()
         self.coder = Transcoder()
         logging.info("coder start...")
-        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst))
+        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos))
         logging.info("coder end...")
+
+    def index_changed(self, path, lines):
+        count = self.get_coding_count()
+        logging.info("coder changed count: %d", count)
+        isSeg = False
+        seconds = 0
+        for line in lines:
+            if line.find("#EXT-X-TARGETDURATION:") == 0:
+                self.extm38u.duration = hls_parse_prop(line, 0)
+                continue
+            elif line.find("#EXT-X-ENDLIST") == 0:
+                logging.info("coder new-segment end")
+                self.extm38u.closeEnd()
+                continue
+            elif line.find("#EXTINF:") == 0:
+                isSeg = True
+                seconds = hls_parse_prop(line, 0)
+                continue
+            elif len(line.strip()) == 0 or line[0] == "#":
+                continue
+            if isSeg:
+                isSeg = False
+                srcf = os.path.join(path, line.strip())
+                name, dstf = self.extm38u.next_name()
+                logging.info("coder new-segment: %s - %s - %s", srcf, name, dstf)
+                copyfile(srcf, dstf)
+                self.extm38u.write(name, seconds)
+            else:
+                logging.warning("coder new-segment invalid: %s", line)
+                pass
+            pass
+        pass
 
     def prepare_coder(self, source, fsrc, fdst):
         if not source or not fsrc or not fdst:
@@ -529,7 +689,7 @@ class HlsService:
 
     def on_message(self, msg):
         logging.info(["recv message: ", msg])
-        self.last_time = get_now()
+        self.last_time = nowtime()
         mtype = msg.get("type")
         if mtype == "status":
             self.conn.send({"type": "status", "data": self.is_alive()})
@@ -559,7 +719,7 @@ class HlsService:
                 #logging.info("coder checking...")
                 #logging.info(["coder check alive:", self.is_alive()])
                 if self.is_alive():
-                    if get_now() >= self.last_time + 30*1000:
+                    if nowtime() >= self.last_time + 30*1000:
                         logging.warning("coder timeout...")
                         self.stop_coder()
                     pass
@@ -972,9 +1132,6 @@ class MyHTTPRequestHandler:
             path += '/'
         return path
 
-    def copyfile(self, source, outputfile):
-        shutil.copyfileobj(source, outputfile)
-
     def guess_type(self, fpath):
         base, ext = posixpath.splitext(fpath)
         if ext in self.extensions_map:
@@ -1009,12 +1166,19 @@ async def run_other_task():
         await asyncio.sleep(1)
 
 
+def do_test():
+    #ftest = MediaExtm38u()
+    #ftest.open("index.m38u", 5)
+    #print(ftest.last_seq, ftest.duration, ftest.probe_count, ftest.is_begin, ftest.is_end, ftest)
+    pass
+
 def do_main():
     logging.basicConfig(
             format='%(asctime)s [%(levelname)s][hls-cli] %(message)s',
             datefmt='%m/%d/%Y %H:%M:%S',
             level=logging.INFO)
     try:
+        do_test()
         handler = MyHTTPRequestHandler()
         handler.init()
 
