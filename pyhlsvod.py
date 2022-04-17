@@ -139,6 +139,71 @@ def gst_parse_value(item):
         return sval == "true"
     return sval
 
+from watchdog.observers import Observer
+from watchdog import events
+class MediaMonitor(events.FileSystemEventHandler):
+    def __init__(self):
+        self.observer = None
+        self.last_lines = []
+        pass
+    def on_any_event(self, evt):
+        #logging.info(["mon-any", evt, evt.src_path])
+        pass
+    def on_moved(self, evt):
+        #logging.info(["mon-moved", evt])
+        self.check_modified(evt.dest_path)
+
+    def check_modified(self, fname):
+        if not os.path.isfile(fname): return
+        if os.path.basename(fname) != "index.m38u": return
+        fp = open(fname, "rb")
+        if not fp: return
+        new_lines = fp.readlines()
+        fp.close()
+
+        result = []
+        old_number = len(self.last_lines)
+        if old_number == 0 or old_number > len(new_lines):
+            result = new_lines
+        else:
+            lines = new_lines[:old_number]
+            if self.last_lines == lines:
+                result = new_lines[old_number:]
+            else:
+                theSame = True
+                for idx in range(old_number):
+                    if lines[idx] != self.last_lines[idx]:
+                        tmpl = "%s" % lines[idx]
+                        if tmpl.find("#EXT-X-MEDIA-SEQUENCE") == -1:
+                            theSame = False
+                            break
+                if theSame:
+                    result = new_lines[old_number:]
+                else:
+                    result = new_lines
+        logging.info(["mon index.m38u changed:", len(self.last_lines), len(new_lines), result])
+        self.last_lines = new_lines
+        pass
+    def start(self, path):
+        self.last_lines = []
+        try:
+            event_handler = self
+            self.observer = Observer()
+            self.observer.schedule(event_handler, path, recursive=True)
+            self.observer.start()
+        except:
+            self.stop_mon()
+            pass
+    def stop(self):
+        if not self.observer: return
+        try:
+            self.observer.stop()
+            self.observer.join()
+            self.observer = None
+        except:
+            pass
+        pass
+
 class MediaExtm3u(object):
     def __init__(self):
         self.fp = None
@@ -394,18 +459,19 @@ class HlsService:
         self.last_time = 0
         self.coder = None
         self.source = None
+        self.monitor = MediaMonitor()
         pass
 
     def _loop(self, coder, fsrc, fdst):
         try:
-            logging.info("coder working...")
+            logging.info("coder loop...")
             coder.do_hlsvod(fsrc, fdst)
         except Exception as e:
-            logging.warning(["coder working error", e])
+            logging.warning(["coder loop error", e])
         except:
-            logging.warning("coder working other error")
+            logging.warning("coder loop other error")
         else:
-            logging.info("coder working end")
+            logging.info("coder loop end")
 
     def get_coder(self):
         if self.coder and self.coder.outdated():
@@ -424,8 +490,12 @@ class HlsService:
             logging.info("coder stop...")
             coder.do_stop()
             self.coder = None
+        self.monitor.stop()
 
     def start_coder(self, fsrc, fdst):
+        self.monitor.stop()
+        self.monitor.start(fdst)
+
         self.last_time = get_now()
         self.coder = Transcoder()
         logging.info("coder start...")
@@ -505,9 +575,9 @@ class HlsService:
 def run_hls_service(conn, index):
     logf = "/tmp/hls_service_%d.txt" % index
     logging.basicConfig(filename=logf, encoding='utf-8',
-            format='%(asctime)s [%(levelname)s][hls-srv] %(message)s',
+            format='%(asctime)s [%(levelname)s] %(message)s',
             datefmt='%m/%d/%Y %H:%M:%S',
-            level=logging.DEBUG)
+            level=logging.INFO)
     logging.info("run_hls_service begin")
     hls = HlsService(conn)
     hls.run_forever()
