@@ -1,4 +1,5 @@
 gst-launch
+samples
 *.o
 *.dylib
 *.so

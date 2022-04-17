@@ -1,25 +1,29 @@
+#!/usr/bin/python
+# coding=utf-8
+# peterxu
+
 import os
 import sys
-import io
 import re
-import copy
 import time
-import select
+import random
+import string
 import shutil
 import mimetypes
 import posixpath
 import logging
-from multiprocessing import Process,Pipe
+from multiprocessing import Process, Pipe
 import threading
 
 import html
 import urllib.parse
-import http.server
 import email.utils
-import socketserver
-import asyncio
 import _thread as thread
+
+import asyncio
 from aiohttp import web
+from watchdog.observers import Observer
+from watchdog import events
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -29,6 +33,7 @@ gi.require_version('GObject', '2.0')
 from gi.repository import Gst, GObject, GLib, GstPbutils
 
 
+#======== common tools
 def nowtime(): #ms
     return int(time.time()*1000)
 
@@ -43,6 +48,27 @@ def tonumber(val, default=None):
         try: ret = float(val)
         except: pass
     return ret
+
+def gen_hex_string(length):
+    sets = "0123456789ABCDEF"
+    return ''.join(random.choice(sets) for i in range(length))
+
+def gen_uuid():
+    items = [gen_hex_string(val) for val in [8, 4, 4, 4, 12]]
+    return '-'.join(items)
+
+async def wait_file_exist(fname, timeout=0):
+    if os.path.exists(fname): return True
+    if timeout == 0: return False
+    interval = 1.0
+    if interval > timeout: interval = timeout
+    times = int(timeout / interval)
+    while times > 0:
+        times -= 1
+        await asyncio.sleep(interval)
+        if os.path.exists(fname): return True
+    return False
+
 
 #======== gstreamer service
 Gst.init(None)
@@ -166,8 +192,7 @@ def hls_parse_segment(line, default=None):
         return default
 
 
-from watchdog.observers import Observer
-from watchdog import events
+#========== file monitor
 class MediaMonitor(events.FileSystemEventHandler):
     def __init__(self):
         self.observer = None
@@ -180,9 +205,9 @@ class MediaMonitor(events.FileSystemEventHandler):
         pass
     def on_moved(self, evt):
         #logging.info(["mon-moved", evt])
-        self.check_modified(evt.dest_path)
+        self.check_path_modified(evt.dest_path)
 
-    def check_modified(self, fname):
+    def check_path_modified(self, fname):
         if not os.path.isfile(fname): return
         if os.path.basename(fname) != "index.m38u": return
         fp = open(fname, "r")
@@ -237,6 +262,8 @@ class MediaMonitor(events.FileSystemEventHandler):
             pass
         pass
 
+
+#======== processing m38u
 class MediaExtm38u(object):
     def __init__(self):
         self.fp = None
@@ -277,6 +304,7 @@ class MediaExtm38u(object):
                 return False
         self.fp = fp
         self.fpath = path
+        self.duration = seconds
         return True
     def write(self, name, seconds):
         if not self.fp:
@@ -288,6 +316,11 @@ class MediaExtm38u(object):
             return False
         self._add_one(self.fp, name, seconds)
         self.fp.flush()
+    def writeProbe(self, count):
+        if self.fp and self.is_begin and not self.is_end:
+            self.fp.write("#PROBE_COUNT:%d\n" % count) 
+            self.fp.flush()
+        pass
     def next_name(self):
         self.last_seq += 1
         name = "hls_segment_%06d.ts" % self.last_seq
@@ -299,6 +332,7 @@ class MediaExtm38u(object):
     def closeEnd(self):
         if self.fp:
             self._add_end(self.fp)
+            self.is_end = True
         self.close()
     def _parse(self, lines, seconds):
         isSeg = False
@@ -359,6 +393,7 @@ class MediaExtm38u(object):
         return True
 
 
+#========= processing media files
 class MediaInfo(object):
     def __init__(self):
         self.infile = ''
@@ -410,7 +445,7 @@ class MediaInfo(object):
         self.info = info
         if self.duration() == 0:
             return False
-        logging.info(["coder media:", info])
+        #logging.info(["coder media:", info])
         if self.hasVideo():
             fps = self.frameRate()
             width = self.width()
@@ -418,6 +453,8 @@ class MediaInfo(object):
             if fps == 0 or width == 0 or height == 0:
                 return False
             logging.info("coder video: %dx%d@%d", width, height, fps)
+        else:
+            logging.info("coder no video")
         return True
 
 
@@ -450,13 +487,13 @@ class Transcoder(object):
         self.mutex.release()
         return count2
 
-    def do_hlsvod(self, infile, outpath, start=0):
+    def do_hlsvod(self, infile, outpath, start, duration):
         outfile = os.path.join(outpath, "index.ts")
         playlist = os.path.join(outpath, "index.m38u")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
         options = {
             "max-files": 1000000,
-            "target-duration": 5,
+            "target-duration": duration,
             "playlist-length": 0,
             "playlist-location": playlist,
             "location": segment,
@@ -565,21 +602,41 @@ class Transcoder(object):
 
 
 #======= sub-process hls-service(backend)
+class HlsMessage:
+    def __init__(self, mtype, name, fsrc=None, fdst=None):
+        self.mtype = mtype
+        self.name = name
+        self.fsrc = fsrc
+        self.fdst = fdst
+        self.duration = 5
+        self.result = None
+
 class HlsService:
     def __init__(self, conn):
         self.mutex = threading.Lock()
         self.conn = conn
-        self.last_time = 0
         self.coder = None
         self.source = None
-        self.monitor = MediaMonitor()
-        self.extm38u = MediaExtm38u()
+        self.monitor = None
+        self.extm38u = None
+        self.last_coder_time = 0
         pass
 
-    def _loop(self, coder, fsrc, fdst, pos):
+    def _reset(self):
+        self.coder = None
+        self.source = None
+        if self.monitor:
+            self.monitor.stop()
+            self.monitor = None
+        if self.extm38u:
+            self.extm38u.close()
+            self.extm38u = None
+        self.last_coder_time = 0
+
+    def _loop(self, coder, fsrc, fdst, pos, duration):
         try:
             logging.info("coder loop...")
-            coder.do_hlsvod(fsrc, fdst, pos)
+            coder.do_hlsvod(fsrc, fdst, pos, duration)
         except Exception as e:
             logging.warning(["coder loop error", e])
         except:
@@ -589,18 +646,22 @@ class HlsService:
 
     def get_coder(self):
         if self.coder and self.coder.outdated():
-            self.coder = None
+            self._reset()
         return self.coder
 
-    def get_coding_count(self):
+    def get_coder_count(self):
         coder = self.get_coder()
         if coder: return coder.get_count()
         return -1
 
-    def is_alive(self):
+    def is_coder_alive(self):
         coder = self.get_coder()
-        if coder:
-            return coder.get_state() != -1
+        if coder: return True
+        return False
+
+    def is_coder_timeout(self):
+        if self.last_coder_time != 0:
+            return nowtime() >= self.last_coder_time + 30*1000
         return False
 
     def stop_coder(self):
@@ -608,40 +669,53 @@ class HlsService:
         if coder:
             logging.info("coder stop...")
             coder.do_stop()
-            self.coder = None
-        self.monitor.stop()
+        self._reset()
 
-    def start_coder(self, fsrc, fdst):
+    def start_coder(self, fsrc, fdst, duration):
         # final destination
-        if not self.extm38u.open(fdst, 5):
+        extm = MediaExtm38u()
+        if not extm.open(fdst, duration):
             return False
-        fpos = self.extm38u.probe_count
+        if extm.is_end:
+            logging.info("coder had end and nop")
+            extm.close()
+            return False
+        fpos = 0 #extm.probe_count
+        self.extm38u = extm
 
         # tmp destination for transcoder
         fdst_tmp = os.path.join(fdst, "cached");
         if not os.path.exists(fdst_tmp):
             os.makedirs(fdst_tmp, exist_ok=True)
-        self.monitor.stop()
-        self.monitor.start(fdst_tmp, self.index_changed)
+        mmon = MediaMonitor()
+        mmon.start(fdst_tmp, self.mon_changed)
+        self.monitor = mmon
 
-        self.last_time = nowtime()
+        self.last_coder_time = nowtime()
         self.coder = Transcoder()
         logging.info("coder start...")
-        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos))
+        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, duration))
         logging.info("coder end...")
 
-    def index_changed(self, path, lines):
-        count = self.get_coding_count()
+    def mon_changed(self, path, lines):
+        extm = self.extm38u
+        if not extm:
+            logging.error("coder changed: invalid extm38u")
+            return
+
+        count = self.get_coder_count()
+        if count > 0: extm.writeProbe(count)
         logging.info("coder changed count: %d", count)
+
         isSeg = False
         seconds = 0
         for line in lines:
             if line.find("#EXT-X-TARGETDURATION:") == 0:
-                self.extm38u.duration = hls_parse_prop(line, 0)
+                extm.duration = hls_parse_prop(line, 0)
                 continue
             elif line.find("#EXT-X-ENDLIST") == 0:
                 logging.info("coder new-segment end")
-                self.extm38u.closeEnd()
+                extm.closeEnd()
                 continue
             elif line.find("#EXTINF:") == 0:
                 isSeg = True
@@ -652,64 +726,61 @@ class HlsService:
             if isSeg:
                 isSeg = False
                 srcf = os.path.join(path, line.strip())
-                name, dstf = self.extm38u.next_name()
+                name, dstf = extm.next_name()
                 logging.info("coder new-segment: %s - %s - %s", srcf, name, dstf)
                 copyfile(srcf, dstf)
-                self.extm38u.write(name, seconds)
+                extm.write(name, seconds)
             else:
                 logging.warning("coder new-segment invalid: %s", line)
                 pass
             pass
         pass
 
-    def prepare_coder(self, source, fsrc, fdst):
+    def prepare_coder(self, source, fsrc, fdst, duration):
+        if duration < 5: duration = 5
         if not source or not fsrc or not fdst:
             logging.warning("invalid coder args")
-            return
+            return False
         if not os.path.isfile(fsrc):
-            logging.warning("<%s> not exist", fsrc)
-            return
+            logging.warning("src not exist: %s", fsrc)
+            return False
         if not os.path.exists(fdst):
             os.makedirs(fdst, exist_ok=True)
-        else:
-            if os.path.isfile(fdst):
-                logging.warning("<%s> should not be file", fdst)
-                return
-        if source == self.source:
-            return
-        if self.is_alive():
+        elif os.path.isfile(fdst):
+            logging.warning("dst is file: %s", fdst)
+            return False
+        if self.is_coder_alive():
             if source != self.source:
-                logging.warning("another <%s> is working", self.source)
-            else:
-                logging.info("<%s> is working and nop", source)
-            return
+                logging.warning("another working: %s", self.source)
+                return False
+            self.last_coder_time = nowtime()
+            return True
         self.source = source
-        self.start_coder(fsrc, fdst)
-        pass
+        ret = self.start_coder(fsrc, fdst, duration)
+        return ret
 
-    def on_message(self, msg):
-        logging.info(["recv message: ", msg])
-        self.last_time = nowtime()
-        mtype = msg.get("type")
-        if mtype == "status":
-            self.conn.send({"type": "status", "data": self.is_alive()})
-        elif mtype == "source":
-            source = msg.get("source")
-            data = msg.get("data")
-            if data:
-                self.prepare_coder(source, data.get("src"), data.get("dst"))
-            pass
+    def on_hls_message(self, msg):
+        if not msg:
+            logging.warning("invalid msg: %s", msg)
+            return
+        logging.info("recv message: %s", msg)
+        resp = HlsMessage("ack", msg.name)
+        if self.prepare_coder(msg.name, msg.fsrc, msg.fdst, msg.duration):
+            resp.result = True
+        else:
+            resp.result = False
+        self.conn.send(resp)
         pass
 
     def run_forever(self):
         while True:
             try:
-                ret = self.conn.poll(0.1)
+                ret = self.conn.poll(0.5)
                 if ret:
                     msg = self.conn.recv()
-                    self.on_message(msg)
+                    self.on_hls_message(msg)
             except Exception as e:
-                logging.warning(["poll err and quit", e])
+                logging.warning("poll err and quit: %s", e)
                 break
             except:
                 logging.warning("poll other err and quit")
@@ -717,12 +788,11 @@ class HlsService:
 
             try:
                 #logging.info("coder checking...")
-                #logging.info(["coder check alive:", self.is_alive()])
-                if self.is_alive():
-                    if nowtime() >= self.last_time + 30*1000:
-                        logging.warning("coder timeout...")
-                        self.stop_coder()
+                if self.is_coder_alive() and self.is_coder_timeout():
+                    logging.warning("coder timeout...")
+                    self.stop_coder()
                     pass
+                self.conn.send(HlsMessage("status", self.source))
                 pass
             except:
                 pass
@@ -751,6 +821,18 @@ class HlsClient:
         self.conn = conn
         self.child = child
         self.source = None
+        self.tmp_source = None
+        self.last_backend_time = nowtime()
+
+    def no_focus(self):
+        return (self.source == None) and (self.tmp_source == None)
+    def in_focus(self, name):
+        if name == self.source or name == self.tmp_source:
+            return True
+        return False
+    def set_focus(self, name):
+        if name != self.source:
+            self.tmp_source = name
 
     def set_alive(self, state):
         self.mutex.acquire()
@@ -763,13 +845,23 @@ class HlsClient:
         self.mutex.release()
         return state
 
-    def is_timeout(self):
-        return False
+    def is_backend_timeout(self):
+        return nowtime() >= self.last_backend_time + 3000
 
     def post_message(self, msg):
         self.conn.send(msg)
 
-    def on_message(self, msg):
+    def on_backend_message(self, msg):
+        self.last_backend_time = nowtime()
+        if not msg:
+            print("invalid msg:", msg)
+            return
+        #print("recv msg:", msg)
+        if msg.mtype == "status" or msg.result is True:
+            self.source = msg.name
+            self.tmp_source = None
+        if msg.name == self.tmp_source:
+            self.tmp_source = None
         pass
 
     def start(self):
@@ -794,7 +886,7 @@ class HlsClient:
                 ret = self.conn.poll(1)
                 if ret:
                     msg = self.conn.recv()
-                    self.on_message(msg)
+                    self.on_backend_message(msg)
             except Exception as e:
                 logging.warning(["hls-cli poll err:", e])
                 break
@@ -810,47 +902,46 @@ def createHls(index):
 
 class HlsCenter:
     def __init__(self):
+        self.count = 1
         self.services = []
         pass
     def init_services(self):
         items = []
-        items.append(createHls(0))
-        #items.append(createHls(1))
+        for idx in range(self.count):
+            items.append(createHls(idx))
         self.services = items
+        time.sleep(1)
     def stop_services(self):
         for item in self.services:
             item.stop()
         self.services = []
     def check_services(self):
-        index = 0
         items = []
-        for item in self.services:
-            if item.is_alive() and item.is_timeout():
-                logging.info("hls-center, one service timeout")
+        for idx in range(self.count):
+            item = self.services[idx]
+            if item.is_alive() and item.is_backend_timeout():
+                logging.info("hls-center, one service timeout and stop")
                 item.stop()
             if item.is_alive():
                 items.append(item)
             else:
                 logging.info("hls-center, one service not alive and restart")
-                items.append(createHls(index))
+                items.append(createHls(idx))
                 time.sleep(1)
-            index += 1
         self.services = items
     def get_service(self, name):
         self.check_services()
+        if not name: return None
         for item in self.services:
-            if item.source == name:
-                return item
+            if item.in_focus(name): return item
         for item in self.services:
-            if not item.source:
-                return item
+            if item.no_focus(): return item
         return None
-    def notify_service(self, name, data):
-        cli = self.get_service(name)
+    def post_service(self, msg):
+        cli = self.get_service(msg.name)
         if cli:
-            cli.source = name
-            cli.post_message({"type":"source", "source":name, "data": data})
-            time.sleep(5)
+            cli.set_focus(msg.name)
+            cli.post_message(msg)
             return True
         return False
 
@@ -949,11 +1040,12 @@ class MyHTTPRequestHandler:
                     return web.HTTPTemporaryRedirect(location=source)
 
                 #TODO:
-                bret = self.hlscenter.notify_service(source, {"src": src_fpath, "dst": dst_fpath})
+                message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+                bret = self.hlscenter.post_service(message)
                 if not bret:
-                    logging.info("check_hls m38u notify failed: %s", source)
-                    #if not bret: return web.HTTPTooManyRequests()
-
+                    logging.warning("check_hls m38u prepare failed: %s", source)
+                    return web.HTTPTooManyRequests()
+                await asyncio.sleep(5)
                 #-- redirect
                 path2 = os.path.join(self.hlskey, path)
                 path2 = os.path.join("/", path2)
@@ -965,9 +1057,13 @@ class MyHTTPRequestHandler:
             err, mtime = self.read_mtime(m38u_fpath)
             if err != None or not self.check_modified(mtime, headers):
                 #TODO:
-                bret = self.hlscenter.notify_service(source, {"src": src_fpath, "dst": dst_fpath})
-                #if not bret: return web.HTTPTooManyRequests()
-                pass
+                message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+                bret = self.hlscenter.post_service(message)
+                if not bret:
+                    logging.warning("check_hls m38u failed: %s", source)
+                    return web.HTTPTooManyRequests()
+                logging.info("check_hls check m38u: %s", m38u_fpath)
+                await asyncio.sleep(3)
             logging.info("check_hls updated m38u: %s", m38u_fpath)
             return self.send_static(m38u_fpath, headers)
 
@@ -987,8 +1083,12 @@ class MyHTTPRequestHandler:
                 if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                     return web.HTTPNotFound(reason="File not found")
                 #TODO:
-                bret = self.hlscenter.notify_service(source, {"src": src_fpath, "dst": dst_fpath})
-                #if not bret: return web.HTTPTooManyRequests()
+                message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+                bret = self.hlscenter.post_service(message)
+                if not bret:
+                    logging.warning("check_hls ts failed: %s", source)
+                    return web.HTTPTooManyRequests()
+                await wait_file_exist(seg_fpath, 10)
                 pass
             #logging.info("check_hls ts file:%s", seg_fpath)
             return self.send_static(seg_fpath, headers)
@@ -1178,7 +1278,6 @@ def do_main():
             datefmt='%m/%d/%Y %H:%M:%S',
             level=logging.INFO)
     try:
-        do_test()
         handler = MyHTTPRequestHandler()
         handler.init()
 
@@ -1193,5 +1292,8 @@ def do_main():
         handler.uninit()
     print()
 
+
+# should use __main__ to support child-process
 if __name__ == "__main__":
+    do_test()
     do_main()
