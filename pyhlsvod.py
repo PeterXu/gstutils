@@ -335,6 +335,7 @@ class MediaExtm38u(object):
             self.is_end = True
         self.close()
     def _parse(self, lines, seconds):
+        last_probe = 0
         isSeg = False
         for line in lines:
             if line.find("#EXTM3U") == 0:
@@ -347,6 +348,7 @@ class MediaExtm38u(object):
                 isSeg = True
                 continue
             elif line.find("#PROBE_COUNT:") == 0:
+                last_probe = self.probe_count
                 self.probe_count = hls_parse_prop(line, 0)
             elif len(line.strip()) == 0 or line[0] == "#":
                 continue
@@ -366,6 +368,7 @@ class MediaExtm38u(object):
             logging.warning("extm3u: invalid duration and restart")
             return False
         if not self.is_end:
+            self.probe_count = last_probe
             if self.probe_count > 0:
                 logging.info("extm3u: continue to last pos: %d", self.probe_count)
                 return True
@@ -499,7 +502,7 @@ class Transcoder(object):
             "location": segment,
         }
         sink = gst_make_elem("hlssink", options)
-        logging.info(["coder hls: %s - %s" % (infile, outpath), sink])
+        logging.info("coder hls: %s - %s, start: %d, duration: %d", infile, outpath, start, duration)
         self.start_pos = start
         self.set_count(-1)
         self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
@@ -703,10 +706,6 @@ class HlsService:
             logging.error("coder changed: invalid extm38u")
             return
 
-        count = self.get_coder_count()
-        if count > 0: extm.writeProbe(count)
-        logging.info("coder changed count: %d", count)
-
         isSeg = False
         seconds = 0
         for line in lines:
@@ -734,6 +733,10 @@ class HlsService:
                 logging.warning("coder new-segment invalid: %s", line)
                 pass
             pass
+        if seconds > 0:
+            count = self.get_coder_count()
+            if count > 0: extm.writeProbe(count)
+            logging.info("coder changed count: %d", count)
         pass
 
     def prepare_coder(self, source, fsrc, fdst, duration):
