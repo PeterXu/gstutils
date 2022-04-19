@@ -289,7 +289,8 @@ class MediaExtm38u(object):
                 self._init()
                 lines = fp.readlines()
                 fp.close()
-                return self._parse(fp.readlines(), seconds)
+                if not self._parse(lines, seconds):
+                    self._init()
             except:
                 pass
         return False
@@ -427,12 +428,13 @@ class MediaInfo(object):
         self.info = {}
 
     def duration(self):
-        try: return self.info.get("duration")
-        except: return 0
+        return self.info.get("duration", 0)
+
+    def bitrate(self):
+        return self.info.get("bitrate", 0)
 
     def mediaType(self, kind): #mux/audio/video
-        try: return self.info.get(kind).get("type")
-        except: return None
+        return self.info.get(kind, {}).get("type", None)
 
     def hasAudio(self):
         return self.mediaType("audio") != None
@@ -441,18 +443,18 @@ class MediaInfo(object):
         return self.mediaType("video") != None
 
     def frameRate(self):
-        try: value = self.info.get("video").get("more").get("framerate")
-        except: return 0
+        value = self.info.get("video", {}).get("more", {}).get("framerate", 0)
+        if type(value) == int: return value
         return gst_parse_value(value)
 
     def width(self):
-        try: value = self.info.get("video").get("more").get("width")
-        except: return 0
+        value = self.info.get("video", {}).get("more", {}).get("width", 0)
+        if type(value) == int: return value
         return gst_parse_value(value)
 
     def height(self):
-        try: value = self.info.get("video").get("more").get("height")
-        except: return 0
+        value = self.info.get("video", {}).get("more", {}).get("height", 0)
+        if type(value) == int: return value
         return gst_parse_value(value)
 
     def isWebDirectSupport(self):
@@ -462,6 +464,7 @@ class MediaInfo(object):
             video = self.mediaType("video")
             if audio != None and audio != "audio/mpeg": return False
             if video != None and video != "video/x-h264": return False 
+            if self.bitrate() > 10*1024*1024: return False
             return True
         return False
 
@@ -472,6 +475,16 @@ class MediaInfo(object):
         self.info = info
         if self.duration() == 0:
             return False
+        try:
+            fp = open(infile, "rb")
+            fs = os.fstat(fp.fileno())
+            fp.close()
+            bps = fs.st_size * 8 / self.duration()
+            info["bitrate"] = int(bps)
+        except:
+            info["bitrate"] = 0
+            pass
+        #print(info)
         #logging.info(["coder media:", info])
         if self.hasVideo():
             fps = self.frameRate()
@@ -654,6 +667,8 @@ class HlsMessage:
         self.fdst = fdst
         self.duration = 5
         self.result = None
+    def str(self):
+        return "%s:%s:%s:%s" % (self.mtype, self.name, self.fsrc, self.fdst)
 
 class HlsService:
     def __init__(self, conn):
@@ -806,9 +821,9 @@ class HlsService:
 
     def on_hls_message(self, msg):
         if not msg:
-            logging.warning("hls-srv, invalid msg: %s", msg)
+            logging.warning("hls-srv, invalid msg: %s", msg.str())
             return
-        logging.info("hls-srv, recv message: %s", msg)
+        logging.info("hls-srv, recv message: %s", msg.str())
         resp = HlsMessage("ack", msg.name)
         if self.prepare_coder(msg.name, msg.fsrc, msg.fdst, msg.duration):
             resp.result = True
@@ -1020,17 +1035,13 @@ class MyHTTPRequestHandler:
         if srcPath is None:
              srcPath = os.getcwd()
         self.workdir = os.fspath(srcPath)
-
         if dstPath is None:
             dstPath = "/tmp/cached"
         self.hlsdir = os.fspath(dstPath)
-
         if maxCount <= 0:
             maxCount = 1
         self.hlscenter = HlsCenter(maxCount)
-
         self.hlskey = "hlsvod"
-        self.hlsindex = "index.m38u"
 
     def init(self):
         self.hlscenter.init_services()
@@ -1068,82 +1079,108 @@ class MyHTTPRequestHandler:
         if not self.support_exts.get(parts[1]):
             return web.HTTPNotFound(reason="File not found")
 
-        ## check m38u file(step1/step2)
+        ##-----
         ## wait m38u update if not modified
-        if os.path.basename(path) == self.hlsindex:
+        prefix = "%s/" % self.hlskey
+        if os.path.basename(path) == "index.m38u":
             #-- parse source
-            pos = path.rfind("/")
-            if pos == -1:
+            pos1 = path.find(prefix)
+            pos2 = path.rfind("/")
+            if pos2 == -1:
                 return web.HTTPBadRequest()
-            source = path[:pos]
+            source = path[:pos2]
+            if pos1 == 0 and pos1 + len(prefix) <= pos2:
+                source = path[pos1+len(prefix):pos2]
+            logging.info("webhandler, m38u source: %s", source)
+
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
+            m38u_fpath = os.path.join(dst_fpath, "index.m38u")
+            if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
+                return web.HTTPNotFound(reason="Source file not found")
 
-            pos = path.find("%s/" % self.hlskey)
-            if pos != 0: # no hlskey
-                logging.info("webhandler, m38u source: %s", source)
+            if pos1 != 0: # no prefix
                 #-- check source info
-                if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                    return web.HTTPNotFound(reason="File not found")
                 minfo = MediaInfo()
                 if not minfo.parse(src_fpath):
                     return web.HTTPUnsupportedMediaType()
                 if minfo.isWebDirectSupport():
-                    source = os.path.join("/", source)
-                    logging.info("webhandler, m38u to source: %s", source)
-                    return web.HTTPTemporaryRedirect(location=source)
+                    path2 = os.path.join("/", source)
+                    logging.info("webhandler, m38u to source: %s", path2)
+                    return web.HTTPTemporaryRedirect(location=path2)
 
-                #TODO:
+                #TODO: prepare
                 message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                 bret = self.hlscenter.post_service(message)
                 if not bret:
                     logging.warning("webhandler, m38u prepare failed: %s", source)
                     return web.HTTPTooManyRequests()
-                await asyncio.sleep(5)
+
                 #-- redirect
-                path2 = os.path.join(self.hlskey, path)
+                await asyncio.sleep(1)
+                path2 = os.path.join(prefix, path)
                 path2 = os.path.join("/", path2)
                 logging.info("webhandler, m38u to redirect: %s", path2)
                 return web.HTTPTemporaryRedirect(location=path2)
 
-            m38u = path[len(self.hlskey)+1:]
-            m38u_fpath = os.path.join(self.hlsdir, m38u)
+            hextm = MediaExtm38u()
+            hextm.parse(dst_fpath, 5)
+            if hextm.is_end:
+                logging.info("webhandler, m38u is complete: %s", m38u_fpath)
+                return self.send_static(m38u_fpath, headers)
+
+            # TODO: prepare
+            message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+            bret = self.hlscenter.post_service(message)
+
+            #-- check m38u mtime
             err, mtime = self.read_mtime(m38u_fpath)
-            if err != None or not self.check_modified(mtime, headers):
-                #TODO:
-                message = HlsMessage("prepare", source, src_fpath, dst_fpath)
-                bret = self.hlscenter.post_service(message)
+            if err != None:
                 if not bret:
-                    logging.warning("webhandler, m38u failed: %s", source)
+                    logging.warning("webhandler, m38u failed: %s", m38u_fpath)
                     return web.HTTPTooManyRequests()
-                logging.info("webhandler, check m38u: %s", m38u_fpath)
-                await asyncio.sleep(3)
-            logging.info("webhandler, updated m38u: %s", m38u_fpath)
+                await wait_file_exist(m38u_fpath, 15)
+            elif not self.check_modified(mtime, headers):
+                logging.info("webhandler, m38u not-updated: %s", m38u_fpath)
+                if hextm.is_begin:
+                    await asyncio.sleep(1)
+                else:
+                    await asyncio.sleep(5)
+            else:
+                logging.info("webhandler, m38u updated: %s", m38u_fpath)
             return self.send_static(m38u_fpath, headers)
 
-        ## check segement file
+        ##-----
         ## wait segment update if not exist
-        if path.find("%s/" % self.hlskey) == 0:
-            segment = path[len(self.hlskey)+1:]
-            seg_fpath = os.path.join(self.hlsdir, segment)
+        pos1 = path.find(prefix)
+        if pos1 == 0:
+            #-- parse source and segment
+            pos2 = path.rfind("/")
+            if pos1 + len(prefix) >= pos2:
+                return web.HTTPBadRequest()
+            segment = path[pos1+len(prefix):]
+            source = path[pos1+len(prefix):pos2]
+            logging.info("webhandler, segment source: %s", source)
 
-            #-- parse source
-            pos = segment.rfind("/")
-            source = segment[:pos]
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
+            seg_fpath = os.path.join(self.hlsdir, segment)
+            if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
+                return web.HTTPNotFound(reason="Source file not found")
 
-            if not os.path.exists(seg_fpath):
-                if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                    return web.HTTPNotFound(reason="File not found")
+            hextm = MediaExtm38u()
+            if os.path.exists(seg_fpath):
+                hextm.parse(dst_fpath, 5)
+            bret = True
+            if not hextm.is_end:
                 #TODO:
                 message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                 bret = self.hlscenter.post_service(message)
+            if not os.path.exists(seg_fpath):
                 if not bret:
-                    logging.warning("webhandler, ts failed: %s", source)
+                    logging.warning("webhandler, segment failed: %s", segment)
                     return web.HTTPTooManyRequests()
-                await wait_file_exist(seg_fpath, 10)
-                pass
+                await wait_file_exist(seg_fpath, 15)
             #logging.info("check_hls ts file:%s", seg_fpath)
             return self.send_static(seg_fpath, headers)
         return web.HTTPBadRequest()
