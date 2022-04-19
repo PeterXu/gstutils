@@ -289,8 +289,9 @@ class MediaExtm38u(object):
                 self._init()
                 lines = fp.readlines()
                 fp.close()
-                if not self._parse(lines, seconds):
-                    self._init()
+                if self._parse(lines, seconds):
+                    return True
+                self._init()
             except:
                 pass
         return False
@@ -394,7 +395,7 @@ class MediaExtm38u(object):
             self.probe_count = last_probe
             self.probe_pos = last_pos
             if self.probe_count > 0:
-                logging.info("extm3u, continue to last pos: %d", self.probe_count)
+                logging.info("extm3u, continue to last pos: %d, seq: %d", self.probe_count, self.last_seq)
                 return True
             return False
         logging.info("extm3u, last ended and nop again!")
@@ -419,6 +420,22 @@ class MediaExtm38u(object):
     def _add_end(self, fp):
         fp.write("#EXT-X-ENDLIST")
         return True
+
+async def wait_extm_update(fname, seconds, minSeq, timeout=0):
+    extm = MediaExtm38u()
+    if extm.parse(fname, seconds) and extm.last_seq >= minSeq:
+        return True
+    if timeout == 0: return False
+    interval = 1.0
+    if interval > timeout: interval = timeout
+    times = int(timeout / interval)
+    while times > 0:
+        times -= 1
+        await asyncio.sleep(interval)
+        extm = MediaExtm38u()
+        if extm.parse(fname, seconds) and extm.last_seq >= minSeq:
+            return True
+    return False
 
 
 #========= processing media files
@@ -720,7 +737,7 @@ class HlsService:
 
     def is_coder_timeout(self):
         if self.last_coder_time != 0:
-            return nowtime() >= self.last_coder_time + 30*1000
+            return nowtime() >= self.last_coder_time + 20*1000
         return False
 
     def stop_coder(self):
@@ -1117,12 +1134,13 @@ class MyHTTPRequestHandler:
                     return web.HTTPTooManyRequests()
 
                 #-- redirect
-                await asyncio.sleep(1)
+                await asyncio.sleep(3)
                 path2 = os.path.join(prefix, path)
                 path2 = os.path.join("/", path2)
                 logging.info("webhandler, m38u to redirect: %s", path2)
                 return web.HTTPTemporaryRedirect(location=path2)
 
+            # parse
             hextm = MediaExtm38u()
             hextm.parse(dst_fpath, 5)
             if hextm.is_end:
@@ -1133,21 +1151,18 @@ class MyHTTPRequestHandler:
             message = HlsMessage("prepare", source, src_fpath, dst_fpath)
             bret = self.hlscenter.post_service(message)
 
-            #-- check m38u mtime
-            err, mtime = self.read_mtime(m38u_fpath)
-            if err != None:
+            #-- check m38u
+            if not os.path.exists(m38u_fpath):
                 if not bret:
                     logging.warning("webhandler, m38u failed: %s", m38u_fpath)
                     return web.HTTPTooManyRequests()
                 await wait_file_exist(m38u_fpath, 15)
-            elif not self.check_modified(mtime, headers):
-                logging.info("webhandler, m38u not-updated: %s", m38u_fpath)
-                if hextm.is_begin:
-                    await asyncio.sleep(1)
-                else:
-                    await asyncio.sleep(5)
+                await wait_extm_update(dst_fpath, 5, 5, 10)
             else:
-                logging.info("webhandler, m38u updated: %s", m38u_fpath)
+                logging.info("webhandler, m38u check-begin: %s", m38u_fpath)
+                await asyncio.sleep(1)
+                await wait_extm_update(dst_fpath, 5, 5, 15)
+                logging.info("webhandler, m38u check-end: %s", m38u_fpath)
             return self.send_static(m38u_fpath, headers)
 
         ##-----
@@ -1393,5 +1408,5 @@ def do_main(srcPath, dstPath, maxCount):
 if __name__ == "__main__":
     do_test()
     set_log_path(None)
-    do_main(None, None, 0)
+    do_main(None, None, 3)
     sys.exit(0)
