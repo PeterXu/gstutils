@@ -5,12 +5,12 @@
     </head>
     <body>
         <video id="video" controls></video>
-        <button id="btnPlay">Play</button>
+        <br>
+        <button id="btnPlay1">Play1</button>
+        <button id="btnPlay2">Play2</button>
         <script>
-            var play = document.getElementById('btnPlay');
-            play.onclick = function() {
+            function playMedia(videoSrc) {
                 var video = document.getElementById('video');
-                var videoSrc = '/samples/test.mkv/index.m38u';
                 if (video.canPlayType('application/vnd.apple.mpegurl')) {
                     video.src = videoSrc;
                 } else if (Hls.isSupported()) {
@@ -19,6 +19,17 @@
                     hls.attachMedia(video);
                 }
                 video.play();
+            };
+
+            var play1 = document.getElementById('btnPlay1');
+            play1.onclick = function() {
+                document.getElementById('btnPlay2').disabled = true;
+                playMedia('/samples/test.mkv/index.m38u');
+            };
+            var play2 = document.getElementById('btnPlay2');
+            play2.onclick = function() {
+                document.getElementById('btnPlay1').disabled = true;
+                playMedia('/samples/test2.mkv/index.m38u');
             };
         </script>
     </body>
