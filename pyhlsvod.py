@@ -273,12 +273,14 @@ class MediaExtm38u(object):
         self.is_begin = False
         self.is_end = False
         self.probe_count = 0
+        self.probe_pos = 0
     def _init(self):
         self.last_seq = -1
         self.duration = 0
         self.is_begin = False
         self.is_end = False
         self.probe_count = 0
+        self.probe_pos = 0
     def open(self, path, seconds, is_new=False):
         if self.fp:
             return False
@@ -325,6 +327,10 @@ class MediaExtm38u(object):
         self.last_seq += 1
         name = "hls_segment_%06d.ts" % self.last_seq
         return name, os.path.join(self.fpath, name)
+    def curr_dur(self):
+        if self.last_seq < 0: return 0
+        return (self.last_seq + 1) * self.duration - 1
+
     def close(self):
         if self.fp:
             self.fp.close()
@@ -335,6 +341,7 @@ class MediaExtm38u(object):
             self.is_end = True
         self.close()
     def _parse(self, lines, seconds):
+        last_pos = 0
         last_probe = 0
         isSeg = False
         for line in lines:
@@ -346,10 +353,10 @@ class MediaExtm38u(object):
                 self.duration = hls_parse_prop(line, 0)
             elif line.find("#EXTINF:") == 0:
                 isSeg = True
+                last_pos += hls_parse_prop(line, 0)
                 continue
             elif line.find("#PROBE_COUNT:") == 0:
-                last_probe = self.probe_count
-                self.probe_count = hls_parse_prop(line, 0)
+                last_probe = hls_parse_prop(line, 0)
             elif len(line.strip()) == 0 or line[0] == "#":
                 continue
             if isSeg:
@@ -369,12 +376,14 @@ class MediaExtm38u(object):
             return False
         if not self.is_end:
             self.probe_count = last_probe
+            self.probe_pos = last_pos
             if self.probe_count > 0:
                 logging.info("extm3u: continue to last pos: %d", self.probe_count)
                 return True
             return False
         logging.info("extm3u: last ended and nop again!")
         self.probe_count = 0
+        self.probe_pos = 0
         return True
     def _add_begin(self, fp, seconds):
         fp.write("#EXTM3U\n")
@@ -468,29 +477,33 @@ class Transcoder(object):
         self.state = -1
         self.loop = None
         self.pipeline = None
-        self.start_pos = 0
+        self.start_pos = [0, 0]
         self.buffer_count = -1
+        self.map_count = {}
         pass
 
     def outdated(self):
         return self.working == -1
 
-    def get_count(self):
+    def get_count(self, dur):
         self.mutex.acquire()
-        count = self.buffer_count
+        count = self.map_count.get(int(dur), 0)
         self.mutex.release()
         return count
 
-    def set_count(self, count):
+    def set_count(self, dur, count):
         self.mutex.acquire()
-        if self.buffer_count == -1:
-            self.buffer_count = 0;
-        self.buffer_count += count
+        if dur < 0 or count < 0:
+            self.buffer_count = 0
+            self.map_count = {}
+        else:
+            self.buffer_count += count
+            self.map_count[int(dur)] = self.buffer_count
         count2 = self.buffer_count
         self.mutex.release()
         return count2
 
-    def do_hlsvod(self, infile, outpath, start, duration):
+    def do_hlsvod(self, infile, outpath, inpos, duration):
         outfile = os.path.join(outpath, "index.ts")
         playlist = os.path.join(outpath, "index.m38u")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
@@ -502,9 +515,9 @@ class Transcoder(object):
             "location": segment,
         }
         sink = gst_make_elem("hlssink", options)
-        logging.info("coder hls: %s - %s, start: %d, duration: %d", infile, outpath, start, duration)
-        self.start_pos = start
-        self.set_count(-1)
+        logging.info("coder hls: %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
+        self.start_pos = inpos
+        self.set_count(-1, -1)
         self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
 
     def do_work(self, infile, outfile, sink, outcaps, akbps, vkbps):
@@ -518,15 +531,16 @@ class Transcoder(object):
         source = gst_make_elem("filesrc", {"location": infile})
         transcode = gst_make_elem("transcodebin")
         Gst.util_set_object_arg(transcode, "profile", profile);
-        pad = transcode.get_static_pad("src")
-        if pad:
-            #ptype = Gst.PadProbeType.BUFFER
-            ptype = Gst.PadProbeType.BUFFER_LIST
-            ret = pad.add_probe(ptype, self.transcode_probe)
-            logging.info(["add probe", pad, ptype, ret])
         if not sink:
             sink = gst_make_elem("filesink", {"location": outfile})
         elems = [source, transcode, sink]
+
+        pad = sink.get_static_pad("sink")
+        if pad:
+            #ptype = Gst.PadProbeType.BUFFER
+            ptype = Gst.PadProbeType.BUFFER_LIST
+            ret = pad.add_probe(ptype, self.transcode_probe, ptype)
+            logging.info(["add probe", pad, ptype, ret])
 
         self.pipeline = Gst.Pipeline()
         gst_add_elems(self.pipeline, elems)
@@ -547,12 +561,21 @@ class Transcoder(object):
     def get_state(self):
         return self.state
 
-    def transcode_probe(self, pad, info):
-        items = info.get_buffer_list()
-        #logging.info(["probe", info, items.length()])
-        if items:
-            count = self.set_count(items.length())
-            if count <= self.start_pos:
+    def transcode_probe(self, pad, info, ptype):
+        count = -1
+        if ptype == Gst.PadProbeType.BUFFER_LIST:
+            items = info.get_buffer_list()
+            if items: count = items.length()
+        elif ptype == Gst.PadProbeType.BUFFER:
+            item = info.get_buffer()
+            if item: count = 1
+        if count >= 0:
+            value = 0
+            ok, pos = self.pipeline.query_position(Gst.Format.TIME)
+            if ok: value = int(float(pos) / Gst.SECOND)
+            total_count = self.set_count(value, count)
+            logging.info(["probe", count, total_count, value, self.start_pos])
+            if total_count <= self.start_pos[0]:
                 return Gst.PadProbeReturn.DROP
         return Gst.PadProbeReturn.OK
 
@@ -587,7 +610,10 @@ class Transcoder(object):
 
     def do_seek_steps(self, sink, steps):
         self.pipeline.set_state(Gst.State.PAUSED)
-        event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 2.0, True, False)
+        event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 1.0, True, False)
+        #event = Gst.Event.new_step(Gst.Format.TIME, steps * Gst.SECOND, 1.0, True, False)
+        #event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH,
+        #        Gst.SeekType.SET, steps * Gst.SECOND, Gst.SeekType.NONE, -1)
         sink.send_event(event)
         pass
 
@@ -636,10 +662,10 @@ class HlsService:
             self.extm38u = None
         self.last_coder_time = 0
 
-    def _loop(self, coder, fsrc, fdst, pos, duration):
+    def _loop(self, coder, fsrc, fdst, fpos, duration):
         try:
             logging.info("coder loop...")
-            coder.do_hlsvod(fsrc, fdst, pos, duration)
+            coder.do_hlsvod(fsrc, fdst, fpos, duration)
         except Exception as e:
             logging.warning(["coder loop error", e])
         except:
@@ -652,9 +678,9 @@ class HlsService:
             self._reset()
         return self.coder
 
-    def get_coder_count(self):
+    def get_coder_count(self, dur):
         coder = self.get_coder()
-        if coder: return coder.get_count()
+        if coder: return coder.get_count(dur)
         return -1
 
     def is_coder_alive(self):
@@ -683,7 +709,6 @@ class HlsService:
             logging.info("coder had end and nop")
             extm.close()
             return False
-        fpos = 0 #extm.probe_count
         self.extm38u = extm
 
         # tmp destination for transcoder
@@ -696,7 +721,8 @@ class HlsService:
 
         self.last_coder_time = nowtime()
         self.coder = Transcoder()
-        logging.info("coder start...")
+        fpos = [extm.probe_count, extm.probe_pos]
+        logging.info("coder start, pos=%s", fpos)
         thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, duration))
         logging.info("coder end...")
 
@@ -734,7 +760,7 @@ class HlsService:
                 pass
             pass
         if seconds > 0:
-            count = self.get_coder_count()
+            count = self.get_coder_count(extm.curr_dur())
             if count > 0: extm.writeProbe(count)
             logging.info("coder changed count: %d", count)
         pass
