@@ -46,6 +46,9 @@ def nowtime(): #ms
 def copyfile(source, dest):
     shutil.copyfile(source, dest)
 
+def movefile(source, dest):
+    shutil.move(source, dest)
+
 def tonumber(val, default=None):
     try:
         ret = default
@@ -54,6 +57,12 @@ def tonumber(val, default=None):
         try: ret = float(val)
         except: pass
     return ret
+
+def timecode_sec(s):
+    if s <= 0: s = 0
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return "%02u:%02u:%02u:00" % (h, m, s)
 
 def gen_hex_string(length):
     sets = "0123456789ABCDEF"
@@ -128,8 +137,8 @@ def gst_make_h264_enc_profile(kbps):
 def gst_make_aac_enc_profile(kbps):
     bps = kbps * 1024
     enc = gst_check_elem("avenc_aac")
-    if not enc: return "audio/mpeg"
-    return "%s,bitrate=%s" % (enc, bps)
+    if not enc: return "audio/mpeg,mpegversion=1"
+    return "audio/mpeg,mpegversion=4,bitrate=%s" % bps
 
 def gst_parse_props(line, key):
     if line.find(key) == -1: return {}
@@ -206,6 +215,9 @@ class MediaMonitor(events.FileSystemEventHandler):
         self.last_lines = []
         self.cb_changed = None
         pass
+    def on_any_event(self, evt):
+        #logging.info(["mon", evt])
+        pass
     def on_moved(self, evt):
         self.check_path_modified(evt.dest_path)
 
@@ -229,12 +241,16 @@ class MediaMonitor(events.FileSystemEventHandler):
                 theSame = True
                 for idx in range(old_number):
                     if lines[idx] != self.last_lines[idx]:
-                        if lines[idx].find("#EXT-X-MEDIA-SEQUENCE") == -1:
-                            theSame = False
-                            break
+                        if lines[idx].find("#EXT-X-MEDIA-SEQUENCE") == 0:
+                            continue
+                        if lines[idx].find("#EXT-X-TARGETDURATION") == 0:
+                            continue
+                        theSame = False
+                        break
                 if theSame:
                     result = new_lines[old_number:]
                 else:
+                    logging.info(["different", new_lines, self.last_lines])
                     result = new_lines
         #logging.info(["mon index.m38u changed:", len(self.last_lines), len(new_lines), result])
         self.last_lines = new_lines
@@ -274,6 +290,7 @@ class MediaExtm38u(object):
         self.is_end = False
         self.probe_count = 0
         self.probe_pos = 0
+        self.media_dur = 0
     def _init(self):
         self.last_seq = -1
         self.duration = 0
@@ -281,6 +298,7 @@ class MediaExtm38u(object):
         self.is_end = False
         self.probe_count = 0
         self.probe_pos = 0
+        self.media_dur = 0
     def parse(self, path):
         self._init()
         fname = os.path.join(path, "index.m38u")
@@ -345,6 +363,8 @@ class MediaExtm38u(object):
     def curr_dur(self):
         if self.last_seq < 0: return 0
         return (self.last_seq + 1) * self.duration - 1
+    def is_complete(self):
+        return self.curr_dur() >= self.media_dur
 
     def close(self):
         if self.fp:
@@ -399,7 +419,7 @@ class MediaExtm38u(object):
             if self.last_seq < 5:
                 logging.warning("extm3u, too few segments: %d and restart", self.last_seq)
                 return False
-            if self.probe_count > 0:
+            if self.probe_count > 0 or self.probe_pos > 0:
                 logging.info("extm3u, continue to last pos: %d, seq: %d", self.probe_count, self.last_seq)
                 return True
             return False
@@ -428,7 +448,7 @@ class MediaExtm38u(object):
 
 async def wait_extm_update(fname, minSeq, timeout=0):
     extm = MediaExtm38u()
-    if extm.parse(fname) and extm.last_seq >= minSeq:
+    if extm.parse(fname) and (extm.is_end or extm.last_seq >= minSeq):
         return True
     if timeout == 0: return False
     interval = 1.0
@@ -437,7 +457,7 @@ async def wait_extm_update(fname, minSeq, timeout=0):
     while times > 0:
         times -= 1
         await asyncio.sleep(interval)
-        if extm.parse(fname) and extm.last_seq >= minSeq:
+        if extm.parse(fname) and (extm.is_end or extm.last_seq >= minSeq):
             return True
     return False
 
@@ -447,6 +467,9 @@ class MediaInfo(object):
     def __init__(self):
         self.infile = ''
         self.info = {}
+
+    def fileSize(self):
+        return self.info.get("filesize", 0)
 
     def duration(self):
         return self.info.get("duration", 0)
@@ -485,7 +508,9 @@ class MediaInfo(object):
             video = self.mediaType("video")
             if audio != None and audio != "audio/mpeg": return False
             if video != None and video != "video/x-h264": return False 
-            if self.bitrate() > 10*1024*1024: return False
+            if self.fileSize() >= 50*1024*1024:   #50MB
+                if self.bitrate() >= 5*1024*1024: #5Mbps
+                    return False
             return True
         return False
 
@@ -501,8 +526,10 @@ class MediaInfo(object):
             fs = os.fstat(fp.fileno())
             fp.close()
             bps = fs.st_size * 8 / self.duration()
+            info["filesize"] = fs.st_size
             info["bitrate"] = int(bps)
         except:
+            info["filesize"] = 0
             info["bitrate"] = 0
             pass
         #print(info)
@@ -553,6 +580,8 @@ class Transcoder(object):
         return count2
 
     def do_hlsvod(self, infile, outpath, inpos, duration):
+        logging.info("gst-coder, %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
+        # output
         outfile = os.path.join(outpath, "index.ts")
         playlist = os.path.join(outpath, "index.m38u")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
@@ -563,39 +592,81 @@ class Transcoder(object):
             "playlist-location": playlist,
             "location": segment,
         }
-        sink = gst_make_elem("hlssink", options)
-        logging.info("gst-coder, %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
-        self.start_pos = inpos
-        self.set_count(-1, -1)
-        self.do_work(infile, outfile, sink, "video/mpegts", 64, 1024)
 
-    def do_work(self, infile, outfile, sink, outcaps, akbps, vkbps):
-        self.working = 1
-        mux = gst_make_mux_profile(outcaps)
-        aac = gst_make_aac_enc_profile(akbps)
-        avc = gst_make_h264_enc_profile(vkbps)
+        # encode
+        mux = gst_make_mux_profile("video/mpegts")
+        aac = gst_make_aac_enc_profile(64)
+        avc = gst_make_h264_enc_profile(1024)
         profile = "%s:%s:%s" % (mux, avc, aac)
         logging.info("gst-coder, profile=%s", profile)
 
+        self.start_pos = inpos
+        self.set_count(-1, -1)
+        sink = "hlssink"
+        for k,v in options.items():
+            if type(v) == int: sink = "%s %s=%s" % (sink, k, v)
+            else: sink = "%s %s=\"%s\"" % (sink, k, v)
+
+        self.working = 1
+        self.do_work0(infile, profile, sink)
+        #sink = gst_make_elem("filesink", {"location": outfile})
+        #sink = gst_make_elem("hlssink", options)
+        #self.do_work(infile, profile, sink)
+        self.working = -1
+        return
+
+    def do_work0(self, infile, profile, sink):
+        minfo = MediaInfo()
+        if not minfo.parse(infile):
+            return
+
+        start = self.start_pos[1]
+        if start > 0: start += 1
+        if start >= minfo.duration(): start = minfo.duration()-1
+        start = timecode_sec(start)
+
+        parts = []
+        parts.append("filesrc location=\"%s\" name=fs" % infile)
+        parts.append("decodebin3 name=db")
+        parts.append("encodebin profile=\"%s\" name=eb" % profile)
+        parts.append("%s name=hs" % sink)
+        parts.append("avwait name=wait target-timecode-string=\"%s\"" % start)
+
+        parts.append("fs. ! db.")
+        if minfo.hasAudio() and minfo.hasVideo():
+            parts.append("db.video_0 ! queue ! timecodestamper ! wait.")
+            parts.append("wait. ! videoconvert ! queue ! eb.video_0")
+            parts.append("db.audio_0 ! queue ! wait.")
+            parts.append("wait. ! audioconvert ! queue ! eb.audio_0")
+        elif minfo.hasVideo():
+            parts.append("db.video_0 ! queue ! timecodestamper ! wait.")
+            parts.append("wait. ! videoconvert ! queue ! eb.video_0")
+        else:
+            parts.append("db.audio_0 ! audioconvert ! queue ! eb.audio_0")
+        parts.append("eb. ! hs.")
+        sstr = " ".join(parts)
+        logging.info("gst-coder, sstr=%s", sstr)
+
+        try:
+            self.pipeline = Gst.parse_launch(sstr)
+            #elem = self.pipeline.get_by_name("hs")
+            #self.add_pad_probe(elem)
+            logging.info("gst-coder, pipeline=%s", self.pipeline)
+            self.check_run()
+        except Exception as e:
+            logging.info(["gst-coder, exception:", e, sstr])
+
+    def do_work(self, infile, profile, sink):
+        self.working = 1
         source = gst_make_elem("filesrc", {"location": infile})
         transcode = gst_make_elem("transcodebin")
         Gst.util_set_object_arg(transcode, "profile", profile);
-        if not sink:
-            sink = gst_make_elem("filesink", {"location": outfile})
         elems = [source, transcode, sink]
-
-        pad = sink.get_static_pad("sink")
-        if pad:
-            #ptype = Gst.PadProbeType.BUFFER
-            #ptype = Gst.PadProbeType.BUFFER_LIST
-            #ret = pad.add_probe(ptype, self.transcode_probe, ptype)
-            #logging.info(["gst-coder, add probe", pad, ptype, ret])
-            pass
+        #self.add_pad_probe(sink)
 
         self.pipeline = Gst.Pipeline()
         gst_add_elems(self.pipeline, elems)
         gst_link_elems(elems)
-        self.elems = elems
         self.check_run()
 
     def do_stop(self):
@@ -611,20 +682,41 @@ class Transcoder(object):
     def get_state(self):
         return self.state
 
-    def transcode_probe(self, pad, info, ptype):
+    def add_pad_probe(self, elem):
+        pad = elem.get_static_pad("sink")
+        if not pad:
+            pad = elem.get_request_pad("sink_0")
+        if pad:
+            #ptype = Gst.PadProbeType.BUFFER
+            ptype = Gst.PadProbeType.BUFFER_LIST
+            #ptype = Gst.PadProbeType.DATA_UPSTREAM
+            ret = pad.add_probe(ptype, self.work_probe, elem)
+            logging.info(["gst-coder, add probe", pad, ptype, ret])
+        else:
+            logging.info(["gst-coder, fail to add probe", elem])
+        pass
+
+    def is_probe_type(self, ptype, value):
+        return int(ptype & value) == int(value)
+
+    def work_probe(self, pad, info, elem):
+        ptype = info.type
+        #logging.info(["gst-coder, probe", info.type, ptype])
         count = -1
-        if ptype == Gst.PadProbeType.BUFFER_LIST:
+        if self.is_probe_type(ptype, Gst.PadProbeType.BUFFER_LIST):
             items = info.get_buffer_list()
             if items: count = items.length()
-        elif ptype == Gst.PadProbeType.BUFFER:
+        elif self.is_probe_type(ptype, Gst.PadProbeType.BUFFER):
             item = info.get_buffer()
             if item: count = 1
+        else:
+            pass
         if count >= 0:
-            value = 0
-            ok, pos = self.pipeline.query_position(Gst.Format.TIME)
+            value = -1
+            ok, pos = elem.query_position(Gst.Format.TIME)
             if ok: value = int(float(pos) / Gst.SECOND)
             total_count = self.set_count(value, count)
-            logging.debug(["gst-coder, probe", count, total_count, value, self.start_pos])
+            logging.info(["gst-coder, probe", count, total_count, value, self.start_pos])
             if total_count <= self.start_pos[0]:
                 return Gst.PadProbeReturn.DROP
         return Gst.PadProbeReturn.OK
@@ -634,7 +726,6 @@ class Transcoder(object):
         bus.add_signal_watch()
         bus.connect("message", self.on_message)
 
-        self.do_seek_steps()
         self.loop = GLib.MainLoop()
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         self.state = int(Gst.State.PLAYING)
@@ -645,40 +736,21 @@ class Transcoder(object):
             logging.warning("gst-coder, run error=%s", e);
             pass
         else:
-            logging.info("gst-coder run end");
+            logging.info("gst-coder, run end");
+            pass
         self.pipeline.set_state(Gst.State.NULL)
         self.state = int(Gst.State.NULL)
-        self.working = -1
-        pass
-
-    def do_position(self):
-        st = self.get_state()
-        if st == int(Gst.State.PLAYING):
-            ok, pos = self.pipeline.query_position(Gst.Format.TIME)
-            if ok:
-                value = int(float(pos) / Gst.SECOND)
-                logging.info("gst-coder state: %d, position: %d - %d", st, pos, value)
-
-    def do_seek_steps(self):
-        sink = self.elems[1]
-        steps = 50
-        self.pipeline.set_state(Gst.State.PAUSED)
-        #event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 1.0, True, False)
-        event = Gst.Event.new_step(Gst.Format.TIME, steps * Gst.SECOND, 1.0, True, True)
-        #event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH,
-        #        Gst.SeekType.SET, steps * Gst.SECOND, Gst.SeekType.NONE, -1)
-        sink.send_event(event)
         pass
 
     def on_message(self, bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            logging.info("gst-coder message: EOS and quit")
+            logging.info("gst-coder, message EOS and quit")
             self.pipeline.set_state(Gst.State.NULL)
             self.loop.quit()
         elif msg.type == Gst.MessageType.ERROR:
             self.pipeline.set_state(Gst.State.NULL)
             err, debug = msg.parse_error()
-            logging.info("gst-coder message: Error: %s", err)
+            logging.info(["gst-coder, message Error:", err, debug])
             self.loop.quit()
         pass
 
@@ -745,7 +817,7 @@ class HlsService:
 
     def is_coder_timeout(self):
         if self.last_coder_time != 0:
-            return nowtime() >= self.last_coder_time + 20*1000
+            return nowtime() >= self.last_coder_time + 15*1000
         return False
 
     def stop_coder(self):
@@ -756,6 +828,10 @@ class HlsService:
         self._reset()
 
     def start_coder(self, source, fsrc, fdst, duration):
+        minfo = MediaInfo()
+        if not minfo.parse(fsrc):
+            return False
+
         # final destination
         extm = MediaExtm38u()
         if not extm.open(fdst, duration):
@@ -764,6 +840,7 @@ class HlsService:
             logging.info("hls-srv, coder had end and nop")
             extm.close()
             return False
+        extm.media_dur = minfo.duration()
         self.extm38u = extm
         self.source = source
 
@@ -778,9 +855,9 @@ class HlsService:
         self.last_coder_time = nowtime()
         self.coder = Transcoder()
         fpos = [extm.probe_count, extm.probe_pos]
-        logging.info("coder start, pos=%s", fpos)
+        logging.info("hls-srv, coder start, pos=%s", fpos)
         thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, duration))
-        logging.info("coder end...")
+        logging.info("hls-srv, coder end...")
 
     def mon_changed(self, path, lines):
         extm = self.extm38u
@@ -792,15 +869,18 @@ class HlsService:
         seconds = 0
         for line in lines:
             if line.find("#EXT-X-TARGETDURATION:") == 0:
-                extm.duration = hls_parse_prop(line, 0)
-                continue
+                #extm.duration = hls_parse_prop(line, 0)
+                pass
             elif line.find("#EXT-X-ENDLIST") == 0:
-                logging.info("hls-srv, changed with new-segment end")
-                extm.closeEnd()
-                continue
+                logging.info("hls-srv, changed with segment, dur: %d-%d", extm.curr_dur(), extm.media_dur)
+                if extm.is_complete():
+                    extm.closeEnd()
+                break
             elif line.find("#EXTINF:") == 0:
                 isSeg = True
                 seconds = hls_parse_prop(line, 0)
+                if seconds > extm.duration:
+                    seconds = 0.1
                 continue
             elif len(line.strip()) == 0 or line[0] == "#":
                 continue
@@ -808,18 +888,18 @@ class HlsService:
                 isSeg = False
                 srcf = os.path.join(path, line.strip())
                 name, dstf = extm.next_name()
-                logging.info("hls-srv, changed with new-segment: %s - %s - %s", srcf, name, dstf)
+                logging.info("hls-srv, chhanged new-segment: <%s> from %s", name, srcf)
                 copyfile(srcf, dstf)
                 extm.write(name, seconds)
             else:
-                logging.warning("hls-srv, changed with invalid new-segment: %s", line)
+                logging.warning("hls-srv, changed invalid new-segment: %s", line)
                 pass
             pass
         if seconds > 0:
             dur = extm.curr_dur()
             count = self.get_coder_count(dur)
             if count > 0: extm.writeProbe(count)
-            logging.info("hls-srv, changed probe-count: %d => %d", dur, count)
+            #logging.info("hls-srv, changed probe-count: %dsec => %d", dur, count)
         pass
 
     def prepare_coder(self, source, fsrc, fdst, duration):
@@ -1124,6 +1204,10 @@ class MyHTTPRequestHandler:
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                 return web.HTTPNotFound(reason="Source file not found")
 
+            # parse
+            hextm = MediaExtm38u()
+            hextm.parse(dst_fpath)
+
             if pos1 != 0: # no prefix
                 #-- check source info
                 minfo = MediaInfo()
@@ -1134,23 +1218,22 @@ class MyHTTPRequestHandler:
                     logging.info("webhandler, m38u to source: %s", path2)
                     return web.HTTPTemporaryRedirect(location=path2)
 
-                #TODO: prepare
-                message = HlsMessage("prepare", source, src_fpath, dst_fpath)
-                bret = self.hlscenter.post_service(message)
-                if not bret:
-                    logging.warning("webhandler, m38u prepare failed: %s", source)
-                    return web.HTTPTooManyRequests()
+                if not hextm.is_end:
+                    #TODO: prepare
+                    message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+                    bret = self.hlscenter.post_service(message)
+                    if not bret:
+                        logging.warning("webhandler, m38u prepare failed: %s", source)
+                        return web.HTTPTooManyRequests()
+                    await asyncio.sleep(3)
 
                 #-- redirect
-                await asyncio.sleep(3)
                 path2 = os.path.join(prefix, path)
                 path2 = os.path.join("/", path2)
                 logging.info("webhandler, m38u to redirect: %s", path2)
                 return web.HTTPTemporaryRedirect(location=path2)
 
-            # parse
-            hextm = MediaExtm38u()
-            hextm.parse(dst_fpath)
+            # send direct
             if hextm.is_end:
                 logging.info("webhandler, m38u is complete: %s", m38u_fpath)
                 return self.send_static(m38u_fpath, headers)
@@ -1164,13 +1247,11 @@ class MyHTTPRequestHandler:
                 if not bret:
                     logging.warning("webhandler, m38u failed: %s", m38u_fpath)
                     return web.HTTPTooManyRequests()
-                await wait_file_exist(m38u_fpath, 15)
-                await wait_extm_update(dst_fpath, 5, 10)
             else:
-                logging.info("webhandler, m38u check-begin: %s", m38u_fpath)
                 await asyncio.sleep(1)
-                await wait_extm_update(dst_fpath, 5, 15)
-                logging.info("webhandler, m38u check-end: %s", m38u_fpath)
+            logging.info("webhandler, m38u check-begin: %s", m38u_fpath)
+            await wait_extm_update(dst_fpath, 5, 15)
+            logging.info("webhandler, m38u check-end: %s", m38u_fpath)
             return self.send_static(m38u_fpath, headers)
 
         ##-----
