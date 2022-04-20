@@ -531,20 +531,20 @@ function gst_transcode(src, copy, start, speed, width, height, fps, v_kbps, a_kb
 end
 
 
---- outf: like before, e.g. /tmp/out_hls.mp4, changed to hls output(/tmp/out_hls.m38u)
+--- outf: like before, e.g. /tmp/out_hls.mp4, changed to hls output(/tmp/out_hls.m3u8)
 function gst_transcode_hls(src, copy, start, speed, width, height, fps, v_kbps, a_kbps, outf)
     dir, name, ext = parse_path(outf)
     if not dir or not name then
         return nil, nil
     end
-    fm38u = string.format([[%s/%s.m38u]], dir, name)
+    fm3u8 = string.format([[%s/%s.m3u8]], dir, name)
     fsegment = string.format([[%s/%s_segment_%%05d.ts]], dir, name)
 
     cmd, mime = gst_transcode(fname, copy, start, speed, width, height, fps, vkbps, akbps, nil)
     if cmd then
         hlscmd = string.format([[%s hlssink max-files=50 target-duration=5 playlist-length=1000 \
             playlist-location="%s" location="%s"]],
-            cmd, fm38u, fsegment)
+            cmd, fm3u8, fsegment)
         return hlscmd, mime
     end
     return nil, nil

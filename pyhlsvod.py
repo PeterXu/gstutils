@@ -223,7 +223,7 @@ class MediaMonitor(events.FileSystemEventHandler):
 
     def check_path_modified(self, fname):
         if not os.path.isfile(fname): return
-        if os.path.basename(fname) != "index.m38u": return
+        if os.path.basename(fname) != "index.m3u8": return
         fp = open(fname, "r")
         if not fp: return
         new_lines = fp.readlines()
@@ -252,7 +252,7 @@ class MediaMonitor(events.FileSystemEventHandler):
                 else:
                     logging.info(["different", new_lines, self.last_lines])
                     result = new_lines
-        #logging.info(["mon index.m38u changed:", len(self.last_lines), len(new_lines), result])
+        #logging.info(["mon index.m3u8 changed:", len(self.last_lines), len(new_lines), result])
         self.last_lines = new_lines
         if self.cb_changed:
             self.cb_changed(self.last_path, result)
@@ -279,8 +279,8 @@ class MediaMonitor(events.FileSystemEventHandler):
             pass
 
 
-#======== processing m38u
-class MediaExtm38u(object):
+#======== processing m3u8
+class MediaExtm3u8(object):
     def __init__(self):
         self.fp = None
         self.fpath = None
@@ -301,7 +301,7 @@ class MediaExtm38u(object):
         self.media_dur = 0
     def parse(self, path):
         self._init()
-        fname = os.path.join(path, "index.m38u")
+        fname = os.path.join(path, "index.m3u8")
         if os.path.isfile(fname):
             try:
                 fp = open(fname, "r")
@@ -319,14 +319,14 @@ class MediaExtm38u(object):
         if seconds <= 0:
             return False
         fp = None
-        fname = os.path.join(path, "index.m38u")
+        fname = os.path.join(path, "index.m3u8")
         if os.path.isfile(fname):
             try:
                 self._init()
                 fp = open(fname, "r+")
                 lines = fp.readlines()
                 if not self._parse(lines, seconds):
-                    logging.warning("extm3u, discard this m38u")
+                    logging.warning("extm3u, discard this m3u8")
                     fp.close()
                     fp = None
             except:
@@ -447,7 +447,7 @@ class MediaExtm38u(object):
         return True
 
 async def wait_extm_update(fname, minSeq, timeout=0):
-    extm = MediaExtm38u()
+    extm = MediaExtm3u8()
     if extm.parse(fname) and (extm.is_end or extm.last_seq >= minSeq):
         return True
     if timeout == 0: return False
@@ -583,7 +583,7 @@ class Transcoder(object):
         logging.info("gst-coder, %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
         # output
         outfile = os.path.join(outpath, "index.ts")
-        playlist = os.path.join(outpath, "index.m38u")
+        playlist = os.path.join(outpath, "index.m3u8")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
         options = {
             "max-files": 1000000,
@@ -774,7 +774,7 @@ class HlsService:
         self.coder = None
         self.source = None
         self.monitor = None
-        self.extm38u = None
+        self.extm3u8 = None
         self.last_coder_time = 0
         pass
 
@@ -784,9 +784,9 @@ class HlsService:
         if self.monitor:
             self.monitor.stop()
             self.monitor = None
-        if self.extm38u:
-            self.extm38u.close()
-            self.extm38u = None
+        if self.extm3u8:
+            self.extm3u8.close()
+            self.extm3u8 = None
         self.last_coder_time = 0
 
     def _loop(self, coder, fsrc, fdst, fpos, duration):
@@ -833,7 +833,7 @@ class HlsService:
             return False
 
         # final destination
-        extm = MediaExtm38u()
+        extm = MediaExtm3u8()
         if not extm.open(fdst, duration):
             return False
         if extm.is_end:
@@ -841,7 +841,7 @@ class HlsService:
             extm.close()
             return False
         extm.media_dur = minfo.duration()
-        self.extm38u = extm
+        self.extm3u8 = extm
         self.source = source
 
         # tmp destination for transcoder
@@ -860,9 +860,9 @@ class HlsService:
         logging.info("hls-srv, coder end...")
 
     def mon_changed(self, path, lines):
-        extm = self.extm38u
+        extm = self.extm3u8
         if not extm:
-            logging.error("hls-srv, changed but invalid extm38u")
+            logging.error("hls-srv, changed but invalid extm3u8")
             return
 
         isSeg = False
@@ -1117,7 +1117,7 @@ class HlsCenter:
 class MyHTTPRequestHandler:
     server_version = "pyhls/1.0"
     support_exts = {
-        '.m38u': True,
+        '.m3u8': True,
         '.ts':   True,
         '.mp4':  True,
     }
@@ -1131,8 +1131,8 @@ class MyHTTPRequestHandler:
         '.mov': 'video/quicktime',
         #'.ts': 'video/mpegts',
         '.ts': 'video/MP2T',
-        #'.m38u': 'application/x-hls',
-        '.m38u': 'application/x-mpegURL',
+        #'.m3u8': 'application/x-hls',
+        '.m3u8': 'application/x-mpegURL',
         '.sh': "text/html",
     }
 
@@ -1156,9 +1156,9 @@ class MyHTTPRequestHandler:
         pass
 
     # hls-play step: origin is "http://../source.mkv", source.mkv(file) is in self.directory
-    # step0: access "http://../source.mkv/index.m38u", this is tempory url.
-    # step1: redirect to "http://../hlsvod/source.mkv/index.m38u",
-    # step2: access "http://../hlsvod/source.mkv/index.m38u", self.hlsdir + source.mkv(dir) + index.m38u
+    # step0: access "http://../source.mkv/index.m3u8", this is tempory url.
+    # step1: redirect to "http://../hlsvod/source.mkv/index.m3u8",
+    # step2: access "http://../hlsvod/source.mkv/index.m3u8", self.hlsdir + source.mkv(dir) + index.m3u8
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         path = self.translate_path(uri)
@@ -1185,9 +1185,9 @@ class MyHTTPRequestHandler:
             return web.HTTPNotFound(reason="File not found")
 
         ##-----
-        ## wait m38u update if not modified
+        ## wait m3u8 update if not modified
         prefix = "%s/" % self.hlskey
-        if os.path.basename(path) == "index.m38u":
+        if os.path.basename(path) == "index.m3u8":
             #-- parse source
             pos1 = path.find(prefix)
             pos2 = path.rfind("/")
@@ -1196,16 +1196,16 @@ class MyHTTPRequestHandler:
             source = path[:pos2]
             if pos1 == 0 and pos1 + len(prefix) <= pos2:
                 source = path[pos1+len(prefix):pos2]
-            logging.info("webhandler, m38u source: %s", source)
+            logging.info("webhandler, m3u8 source: %s", source)
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
-            m38u_fpath = os.path.join(dst_fpath, "index.m38u")
+            m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                 return web.HTTPNotFound(reason="Source file not found")
 
             # parse
-            hextm = MediaExtm38u()
+            hextm = MediaExtm3u8()
             hextm.parse(dst_fpath)
 
             if pos1 != 0: # no prefix
@@ -1215,7 +1215,7 @@ class MyHTTPRequestHandler:
                     return web.HTTPUnsupportedMediaType()
                 if minfo.isWebDirectSupport():
                     path2 = os.path.join("/", source)
-                    logging.info("webhandler, m38u to source: %s", path2)
+                    logging.info("webhandler, m3u8 to source: %s", path2)
                     return web.HTTPTemporaryRedirect(location=path2)
 
                 if not hextm.is_end:
@@ -1223,36 +1223,36 @@ class MyHTTPRequestHandler:
                     message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                     bret = self.hlscenter.post_service(message)
                     if not bret:
-                        logging.warning("webhandler, m38u prepare failed: %s", source)
+                        logging.warning("webhandler, m3u8 prepare failed: %s", source)
                         return web.HTTPTooManyRequests()
                     await asyncio.sleep(3)
 
                 #-- redirect
                 path2 = os.path.join(prefix, path)
                 path2 = os.path.join("/", path2)
-                logging.info("webhandler, m38u to redirect: %s", path2)
+                logging.info("webhandler, m3u8 to redirect: %s", path2)
                 return web.HTTPTemporaryRedirect(location=path2)
 
             # send direct
             if hextm.is_end:
-                logging.info("webhandler, m38u is complete: %s", m38u_fpath)
-                return self.send_static(m38u_fpath, headers)
+                logging.info("webhandler, m3u8 is complete: %s", m3u8_fpath)
+                return self.send_static(m3u8_fpath, headers)
 
             # TODO: prepare
             message = HlsMessage("prepare", source, src_fpath, dst_fpath)
             bret = self.hlscenter.post_service(message)
 
-            #-- check m38u
-            if not os.path.exists(m38u_fpath):
+            #-- check m3u8
+            if not os.path.exists(m3u8_fpath):
                 if not bret:
-                    logging.warning("webhandler, m38u failed: %s", m38u_fpath)
+                    logging.warning("webhandler, m3u8 failed: %s", m3u8_fpath)
                     return web.HTTPTooManyRequests()
             else:
                 await asyncio.sleep(1)
-            logging.info("webhandler, m38u check-begin: %s", m38u_fpath)
+            logging.info("webhandler, m3u8 check-begin: %s", m3u8_fpath)
             await wait_extm_update(dst_fpath, 5, 15)
-            logging.info("webhandler, m38u check-end: %s", m38u_fpath)
-            return self.send_static(m38u_fpath, headers)
+            logging.info("webhandler, m3u8 check-end: %s", m3u8_fpath)
+            return self.send_static(m3u8_fpath, headers)
 
         ##-----
         ## wait segment update if not exist
@@ -1272,7 +1272,7 @@ class MyHTTPRequestHandler:
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
                 return web.HTTPNotFound(reason="Source file not found")
 
-            hextm = MediaExtm38u()
+            hextm = MediaExtm3u8()
             if os.path.exists(seg_fpath):
                 hextm.parse(dst_fpath)
             bret = True
@@ -1462,8 +1462,8 @@ async def run_other_task():
 
 
 def do_test():
-    #ftest = MediaExtm38u()
-    #ftest.open("index.m38u", 5)
+    #ftest = MediaExtm3u8()
+    #ftest.open("index.m3u8", 5)
     #print(ftest.last_seq, ftest.duration, ftest.probe_count, ftest.is_begin, ftest.is_end, ftest)
     pass
 
