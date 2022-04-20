@@ -281,19 +281,19 @@ class MediaExtm38u(object):
         self.is_end = False
         self.probe_count = 0
         self.probe_pos = 0
-    def parse(self, path, seconds):
+    def parse(self, path):
+        self._init()
         fname = os.path.join(path, "index.m38u")
         if os.path.isfile(fname):
             try:
                 fp = open(fname, "r")
-                self._init()
                 lines = fp.readlines()
                 fp.close()
-                if self._parse(lines, seconds):
+                if self._parse(lines, 0, False):
                     return True
-                self._init()
             except:
                 pass
+            self._init()
         return False
     def open(self, path, seconds):
         if self.fp:
@@ -304,9 +304,10 @@ class MediaExtm38u(object):
         fname = os.path.join(path, "index.m38u")
         if os.path.isfile(fname):
             try:
-                fp = open(fname, "r+")
                 self._init()
-                if fp and not self._parse(fp.readlines(), seconds):
+                fp = open(fname, "r+")
+                lines = fp.readlines()
+                if not self._parse(lines, seconds):
                     logging.warning("extm3u, discard this m38u")
                     fp.close()
                     fp = None
@@ -314,8 +315,8 @@ class MediaExtm38u(object):
                 pass
         if not fp:
             try:
-                fp = open(fname, "w")
                 self._init()
+                fp = open(fname, "w")
             except:
                 return False
         self.fp = fp
@@ -354,7 +355,7 @@ class MediaExtm38u(object):
             self._add_end(self.fp)
             self.is_end = True
         self.close()
-    def _parse(self, lines, seconds):
+    def _parse(self, lines, seconds, strongCheck=True):
         last_pos = 0
         last_probe = 0
         isSeg = False
@@ -384,7 +385,13 @@ class MediaExtm38u(object):
                     return False
                 self.last_seq = seq
         if not self.is_begin:
+            logging.warning("extm3u, no begin and restart")
             return False
+        self.probe_count = last_probe
+        self.probe_pos = last_pos
+        if not strongCheck:
+            return True
+
         if self.duration != seconds:
             logging.warning("extm3u, invalid duration and restart")
             return False
@@ -392,8 +399,6 @@ class MediaExtm38u(object):
             if self.last_seq < 5:
                 logging.warning("extm3u, too few segments: %d and restart", self.last_seq)
                 return False
-            self.probe_count = last_probe
-            self.probe_pos = last_pos
             if self.probe_count > 0:
                 logging.info("extm3u, continue to last pos: %d, seq: %d", self.probe_count, self.last_seq)
                 return True
@@ -421,9 +426,9 @@ class MediaExtm38u(object):
         fp.write("#EXT-X-ENDLIST")
         return True
 
-async def wait_extm_update(fname, seconds, minSeq, timeout=0):
+async def wait_extm_update(fname, minSeq, timeout=0):
     extm = MediaExtm38u()
-    if extm.parse(fname, seconds) and extm.last_seq >= minSeq:
+    if extm.parse(fname) and extm.last_seq >= minSeq:
         return True
     if timeout == 0: return False
     interval = 1.0
@@ -432,8 +437,7 @@ async def wait_extm_update(fname, seconds, minSeq, timeout=0):
     while times > 0:
         times -= 1
         await asyncio.sleep(interval)
-        extm = MediaExtm38u()
-        if extm.parse(fname, seconds) and extm.last_seq >= minSeq:
+        if extm.parse(fname) and extm.last_seq >= minSeq:
             return True
     return False
 
@@ -583,9 +587,10 @@ class Transcoder(object):
         pad = sink.get_static_pad("sink")
         if pad:
             #ptype = Gst.PadProbeType.BUFFER
-            ptype = Gst.PadProbeType.BUFFER_LIST
-            ret = pad.add_probe(ptype, self.transcode_probe, ptype)
-            logging.info(["gst-coder, add probe", pad, ptype, ret])
+            #ptype = Gst.PadProbeType.BUFFER_LIST
+            #ret = pad.add_probe(ptype, self.transcode_probe, ptype)
+            #logging.info(["gst-coder, add probe", pad, ptype, ret])
+            pass
 
         self.pipeline = Gst.Pipeline()
         gst_add_elems(self.pipeline, elems)
@@ -629,6 +634,7 @@ class Transcoder(object):
         bus.add_signal_watch()
         bus.connect("message", self.on_message)
 
+        self.do_seek_steps()
         self.loop = GLib.MainLoop()
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         self.state = int(Gst.State.PLAYING)
@@ -653,10 +659,12 @@ class Transcoder(object):
                 value = int(float(pos) / Gst.SECOND)
                 logging.info("gst-coder state: %d, position: %d - %d", st, pos, value)
 
-    def do_seek_steps(self, sink, steps):
+    def do_seek_steps(self):
+        sink = self.elems[1]
+        steps = 50
         self.pipeline.set_state(Gst.State.PAUSED)
-        event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 1.0, True, False)
-        #event = Gst.Event.new_step(Gst.Format.TIME, steps * Gst.SECOND, 1.0, True, False)
+        #event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 1.0, True, False)
+        event = Gst.Event.new_step(Gst.Format.TIME, steps * Gst.SECOND, 1.0, True, True)
         #event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH,
         #        Gst.SeekType.SET, steps * Gst.SECOND, Gst.SeekType.NONE, -1)
         sink.send_event(event)
@@ -1142,7 +1150,7 @@ class MyHTTPRequestHandler:
 
             # parse
             hextm = MediaExtm38u()
-            hextm.parse(dst_fpath, 5)
+            hextm.parse(dst_fpath)
             if hextm.is_end:
                 logging.info("webhandler, m38u is complete: %s", m38u_fpath)
                 return self.send_static(m38u_fpath, headers)
@@ -1157,11 +1165,11 @@ class MyHTTPRequestHandler:
                     logging.warning("webhandler, m38u failed: %s", m38u_fpath)
                     return web.HTTPTooManyRequests()
                 await wait_file_exist(m38u_fpath, 15)
-                await wait_extm_update(dst_fpath, 5, 5, 10)
+                await wait_extm_update(dst_fpath, 5, 10)
             else:
                 logging.info("webhandler, m38u check-begin: %s", m38u_fpath)
                 await asyncio.sleep(1)
-                await wait_extm_update(dst_fpath, 5, 5, 15)
+                await wait_extm_update(dst_fpath, 5, 15)
                 logging.info("webhandler, m38u check-end: %s", m38u_fpath)
             return self.send_static(m38u_fpath, headers)
 
@@ -1185,7 +1193,7 @@ class MyHTTPRequestHandler:
 
             hextm = MediaExtm38u()
             if os.path.exists(seg_fpath):
-                hextm.parse(dst_fpath, 5)
+                hextm.parse(dst_fpath)
             bret = True
             if not hextm.is_end:
                 #TODO:
@@ -1380,6 +1388,7 @@ def do_test():
 
 def do_main(srcPath, dstPath, maxCount):
     logf = os.path.join(gLogPath, "hls_client.txt")
+    logf = "/dev/stdout"
     logging.basicConfig(filename=logf, encoding='utf-8',
             format='%(asctime)s [%(levelname)s] %(message)s',
             datefmt='%m/%d/%Y %H:%M:%S',
@@ -1408,5 +1417,5 @@ def do_main(srcPath, dstPath, maxCount):
 if __name__ == "__main__":
     do_test()
     set_log_path(None)
-    do_main(None, None, 3)
+    do_main(None, None, 1)
     sys.exit(0)
