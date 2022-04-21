@@ -9,19 +9,14 @@ The request uri:
     /hlsvod/U1000/avatar.mp4/index.m3u8
 
 The nginx conf:
-        location /hlsvod {
+        location ~ ^/(hlsvod|deepnas/media/hlsvod) {
             lua_code_cache off;
             set $upstream "";
-            rewrite_by_lua_file lua/hlsvod_proxy.lua;
-            proxy_pass $upstream;
-        }
-        location /deepnas/media/hlsvod {
-            lua_code_cache off;
-            set $upstream "";
-            rewrite_by_lua_file lua/hlsvod_proxy.lua;
+            rewrite_by_lua_file lua/backend/hlsvod_proxy.lua;
             proxy_pass $upstream;
         }
 --]]
+
 
 -- default proxy addr
 local proxy_addr = "http://127.0.0.1:8001"

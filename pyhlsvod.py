@@ -32,19 +32,39 @@ from watchdog import events
 
 import gi
 gi.require_version('Gst', '1.0')
-gi.require_version('GstPbutils', '1.0')
 gi.require_version('GLib', '2.0')
 gi.require_version('GObject', '2.0')
-from gi.repository import Gst, GObject, GLib, GstPbutils
+from gi.repository import Gst, GObject, GLib
 
-gLogPath = "/tmp"
+try:
+    gi.require_version('GstPbutils', '1.0')
+    from gi.repository import GstPbutils
+except:
+    pass
+
+
 def set_log_path(path):
-    if not path: return
-    fpath = os.fspath(path)
-    if os.path.isdir(fpath):
-        gLogPath = fpath
+    if pyver() >= 39:
+        logf = "/dev/stdout"
+        if path: logf = os.fspath(path)
+        logging.basicConfig(filename=logf, encoding='utf-8',
+            format='%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%m/%d/%Y %H:%M:%S',
+            level=logging.INFO)
+    else:
+        logf = "/tmp/hlsout.txt"
+        if path: logf = os.fspath(path)
+        logging.basicConfig(filename=logf,
+            format='%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%m/%d/%Y %H:%M:%S',
+            level=logging.INFO)
 
 #======== common tools
+def pyver():
+    major = sys.version_info[0]
+    minor = sys.version_info[1]
+    return major * 10 + minor
+
 def nowtime(): #ms
     return int(time.time()*1000)
 
@@ -123,27 +143,36 @@ def gst_make_mux_profile(caps):
         return "video/mpegts,systemstream=true,packetsize=188"
     elif caps == "video/quicktime":
         return "video/quicktime"
-    return "matroskamux"
-def gst_make_h264_enc_profile(kbps):
-    bps = kbps * 1024
-    props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main",}
-    props2 = {"pass":"pass1", "bitrate":bps, "profile":"main",}
-    props = {"mppvideoenc": props1, "avenc_h264_videotoolbox": props2, "avenc_h264": props2}
-    enc = gst_check_elem("mppvideoenc")
-    if not enc:
-        enc = gst_check_elem("avenc_h264_videotoolbox")
-    if not enc:
-        enc = gst_check_elem("avenc_h264")
-    if not enc: return "video/x-h264"
-    profile = enc
-    for k, v in props[enc].items():
-        profile = "%s,%s=%s" % (profile, k, v)
-    return profile
+    return "video/x-matroska"
 def gst_make_aac_enc_profile(kbps):
     bps = kbps * 1024
-    enc = gst_check_elem("avenc_aac")
-    if not enc: return "audio/mpeg,mpegversion=1"
     return "audio/mpeg,mpegversion=4,bitrate=%s" % bps
+def gst_make_h264_enc_profile(kbps):
+    bps = kbps * 1024
+    return "video/x-h264,stream-format=byte-stream,bitrate=%s" % bps
+def gst_make_audio_props(name, kbps):
+    bps = kbps * 1024
+    props = {
+        "faac": {"bitrate": bps},
+        "avenc_aac": {"bitrate": bps},
+    }
+    for k, v in props.items():
+        if name.find(k) == 0: return v
+    return None
+def gst_make_video_props(name, kbps):
+    bps = kbps * 1024
+    props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main",}
+    props2 = {"pass":"pass1", "bitrate":bps, "profile":"main"}
+    props3 = {"pass":"pass1", "bitrate":bps}
+    props = {
+        "mpph264enc": props1,
+        "avenc_h264_videotoolbox": props2,
+        "avenc_h264": props2,
+        "x264enc": props3
+    }
+    for k, v in props.items():
+        if name.find(k) == 0: return v
+    return None
 
 def gst_parse_props(line, key):
     if line.find(key) == -1: return {}
@@ -293,7 +322,6 @@ class MediaExtm3u8(object):
         self.duration = 0
         self.is_begin = False
         self.is_end = False
-        self.probe_count = 0
         self.probe_pos = 0
         self.media_dur = 0
     def _init(self):
@@ -301,7 +329,6 @@ class MediaExtm3u8(object):
         self.duration = 0
         self.is_begin = False
         self.is_end = False
-        self.probe_count = 0
         self.probe_pos = 0
         self.media_dur = 0
     def parse(self, path):
@@ -356,11 +383,6 @@ class MediaExtm3u8(object):
             return False
         self._add_one(self.fp, name, seconds)
         self.fp.flush()
-    def writeProbe(self, count):
-        if self.fp and self.is_begin and not self.is_end:
-            self.fp.write("#PROBE_COUNT:%d\n" % count) 
-            self.fp.flush()
-        pass
     def next_name(self):
         self.last_seq += 1
         name = "hls_segment_%06d.ts" % self.last_seq
@@ -382,7 +404,6 @@ class MediaExtm3u8(object):
         self.close()
     def _parse(self, lines, seconds, strongCheck=True):
         last_pos = 0
-        last_probe = 0
         isSeg = False
         for line in lines:
             if line.find("#EXTM3U") == 0:
@@ -395,8 +416,6 @@ class MediaExtm3u8(object):
                 isSeg = True
                 last_pos += hls_parse_prop(line, 0)
                 continue
-            elif line.find("#PROBE_COUNT:") == 0:
-                last_probe = hls_parse_prop(line, 0)
             elif len(line.strip()) == 0 or line[0] == "#":
                 continue
             if isSeg:
@@ -412,24 +431,22 @@ class MediaExtm3u8(object):
         if not self.is_begin:
             logging.warning("extm3u, no begin and restart")
             return False
-        self.probe_count = last_probe
         self.probe_pos = last_pos
         if not strongCheck:
             return True
 
         if self.duration != seconds:
-            logging.warning("extm3u, invalid duration and restart")
-            return False
+            logging.warning("extm3u, different duration")
+            #return False
         if not self.is_end:
             if self.last_seq < 5:
                 logging.warning("extm3u, too few segments: %d and restart", self.last_seq)
                 return False
-            if self.probe_count > 0 or self.probe_pos > 0:
-                logging.info("extm3u, continue to last pos: %d, seq: %d", self.probe_count, self.last_seq)
+            if self.probe_pos > 0:
+                logging.info("extm3u, continue to last pos: %d, seq: %d", self.probe_pos, self.last_seq)
                 return True
             return False
         logging.info("extm3u, last ended and nop again!")
-        self.probe_count = 0
         self.probe_pos = 0
         return True
     def _add_begin(self, fp, seconds):
@@ -437,7 +454,7 @@ class MediaExtm3u8(object):
         fp.write("#EXT-X-VERSION:3\n")
         fp.write("#EXT-X-ALLOW-CACHE:NO\n")
         fp.write("#EXT-X-MEDIA-SEQUENCE:0\n")
-        fp.write("#EXT-X-TARGETDURATION:%d\n" % seconds)
+        fp.write("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
         fp.write("\n")
         return True
     def _add_one(self, fp, segment, seconds):
@@ -598,13 +615,6 @@ class Transcoder(object):
             "location": segment,
         }
 
-        # encode
-        mux = gst_make_mux_profile("video/mpegts")
-        aac = gst_make_aac_enc_profile(64)
-        avc = gst_make_h264_enc_profile(1024)
-        profile = "%s:%s:%s" % (mux, avc, aac)
-        logging.info("gst-coder, profile=%s", profile)
-
         self.start_pos = inpos
         self.set_count(-1, -1)
         sink = "hlssink"
@@ -613,19 +623,21 @@ class Transcoder(object):
             else: sink = "%s %s=\"%s\"" % (sink, k, v)
 
         self.working = 1
-        self.do_work0(infile, profile, sink)
-        #sink = gst_make_elem("filesink", {"location": outfile})
-        #sink = gst_make_elem("hlssink", options)
-        #self.do_work(infile, profile, sink)
+        self.do_work0(infile, 64, 1024, "video/mpegts", sink)
         self.working = -1
         return
 
-    def do_work0(self, infile, profile, sink):
+    def do_work0(self, infile, akbps, vkbps, outcaps, sink):
+        aac = gst_make_aac_enc_profile(akbps)
+        avc = gst_make_h264_enc_profile(vkbps)
+        mux = gst_make_mux_profile(outcaps)
+        logging.info("gst-coder, elems=%s, %s, %s", mux, avc, aac)
+        profile = "%s:%s:%s" % (mux, aac, avc)
         minfo = MediaInfo()
         if not minfo.parse(infile):
             return
 
-        start = self.start_pos[1]
+        start = self.start_pos
         if start > 0: start += 1
         if start >= minfo.duration(): start = minfo.duration()-1
         start = timecode_sec(start)
@@ -639,40 +651,36 @@ class Transcoder(object):
 
         parts.append("fs. ! db.")
         if minfo.hasAudio() and minfo.hasVideo():
-            parts.append("db.video_0 ! queue ! timecodestamper ! wait.")
-            parts.append("wait. ! videoconvert ! queue ! eb.video_0")
-            parts.append("db.audio_0 ! queue ! wait.")
-            parts.append("wait. ! audioconvert ! queue ! eb.audio_0")
+            parts.append("db.audio_0 ! audio/x-raw ! audioconvert ! queue ! wait.")
+            parts.append("wait. ! queue ! eb.audio_0")
+            parts.append("db.video_0 ! video/x-raw ! videoconvert ! queue ! timecodestamper ! wait.")
+            parts.append("wait. ! queue ! eb.video_0")
         elif minfo.hasVideo():
-            parts.append("db.video_0 ! queue ! timecodestamper ! wait.")
-            parts.append("wait. ! videoconvert ! queue ! eb.video_0")
+            parts.append("db.video_0 ! video/x-raw ! videoconvert ! queue ! timecodestamper ! wait.")
+            parts.append("wait. ! queue ! eb.video_0")
         else:
-            parts.append("db.audio_0 ! audioconvert ! queue ! eb.audio_0")
+            parts.append("db.audio_0 ! audio/x-raw ! audioconvert ! queue ! eb.audio_0")
         parts.append("eb. ! hs.")
         sstr = " ".join(parts)
         logging.info("gst-coder, sstr=%s", sstr)
 
         try:
             self.pipeline = Gst.parse_launch(sstr)
-            #elem = self.pipeline.get_by_name("hs")
-            #self.add_pad_probe(elem)
             logging.info("gst-coder, pipeline=%s", self.pipeline)
+            eb = self.pipeline.get_by_name("eb")
+            if eb:
+                for i in range(eb.get_children_count()):
+                    e = eb.get_child_by_index(i)
+                    props = gst_make_audio_props(e.get_name(), akbps)
+                    if not props: props = gst_make_video_props(e.get_name(), vkbps)
+                    if props:
+                        logging.info("gst-coder, set-props for <%s>", e.get_name())
+                        for k, v in props.items():
+                            e.set_property(k, v)
+                            logging.info("gst-coder, set-props for <%s => %s:%s>", e.get_name(), k, v)
             self.check_run()
         except Exception as e:
             logging.info(["gst-coder, exception:", e, sstr])
-
-    def do_work(self, infile, profile, sink):
-        self.working = 1
-        source = gst_make_elem("filesrc", {"location": infile})
-        transcode = gst_make_elem("transcodebin")
-        Gst.util_set_object_arg(transcode, "profile", profile);
-        elems = [source, transcode, sink]
-        #self.add_pad_probe(sink)
-
-        self.pipeline = Gst.Pipeline()
-        gst_add_elems(self.pipeline, elems)
-        gst_link_elems(elems)
-        self.check_run()
 
     def do_stop(self):
         if self.loop and self.pipeline:
@@ -686,45 +694,6 @@ class Transcoder(object):
     # VOID_PENDING:0, NULL:1, READY:2, PAUSED:3, PLAYING:4
     def get_state(self):
         return self.state
-
-    def add_pad_probe(self, elem):
-        pad = elem.get_static_pad("sink")
-        if not pad:
-            pad = elem.get_request_pad("sink_0")
-        if pad:
-            #ptype = Gst.PadProbeType.BUFFER
-            ptype = Gst.PadProbeType.BUFFER_LIST
-            #ptype = Gst.PadProbeType.DATA_UPSTREAM
-            ret = pad.add_probe(ptype, self.work_probe, elem)
-            logging.info(["gst-coder, add probe", pad, ptype, ret])
-        else:
-            logging.info(["gst-coder, fail to add probe", elem])
-        pass
-
-    def is_probe_type(self, ptype, value):
-        return int(ptype & value) == int(value)
-
-    def work_probe(self, pad, info, elem):
-        ptype = info.type
-        #logging.info(["gst-coder, probe", info.type, ptype])
-        count = -1
-        if self.is_probe_type(ptype, Gst.PadProbeType.BUFFER_LIST):
-            items = info.get_buffer_list()
-            if items: count = items.length()
-        elif self.is_probe_type(ptype, Gst.PadProbeType.BUFFER):
-            item = info.get_buffer()
-            if item: count = 1
-        else:
-            pass
-        if count >= 0:
-            value = -1
-            ok, pos = elem.query_position(Gst.Format.TIME)
-            if ok: value = int(float(pos) / Gst.SECOND)
-            total_count = self.set_count(value, count)
-            logging.info(["gst-coder, probe", count, total_count, value, self.start_pos])
-            if total_count <= self.start_pos[0]:
-                return Gst.PadProbeReturn.DROP
-        return Gst.PadProbeReturn.OK
 
     def check_run(self):
         bus = self.pipeline.get_bus()
@@ -757,6 +726,8 @@ class Transcoder(object):
             err, debug = msg.parse_error()
             logging.info(["gst-coder, message Error:", err, debug])
             self.loop.quit()
+        elif msg.type == Gst.MessageType.STATE_CHANGED:
+            pass
         pass
 
 
@@ -859,7 +830,7 @@ class HlsService:
 
         self.last_coder_time = nowtime()
         self.coder = Transcoder()
-        fpos = [extm.probe_count, extm.probe_pos]
+        fpos = extm.probe_pos
         logging.info("hls-srv, coder start, pos=%s", fpos)
         thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, duration))
         logging.info("hls-srv, coder end...")
@@ -884,7 +855,7 @@ class HlsService:
             elif line.find("#EXTINF:") == 0:
                 isSeg = True
                 seconds = hls_parse_prop(line, 0)
-                if seconds > extm.duration:
+                if seconds > extm.duration*10:
                     seconds = 0.1
                 continue
             elif len(line.strip()) == 0 or line[0] == "#":
@@ -900,11 +871,6 @@ class HlsService:
                 logging.warning("hls-srv, changed invalid new-segment: %s", line)
                 pass
             pass
-        if seconds > 0:
-            dur = extm.curr_dur()
-            count = self.get_coder_count(dur)
-            if count > 0: extm.writeProbe(count)
-            #logging.info("hls-srv, changed probe-count: %dsec => %d", dur, count)
         pass
 
     def prepare_coder(self, source, fsrc, fdst, duration):
@@ -971,11 +937,8 @@ class HlsService:
 
 
 def run_hls_service(conn, index):
-    logf = os.path.join(gLogPath, "hls_service_%d.txt" % index)
-    logging.basicConfig(filename=logf, encoding='utf-8',
-            format='%(asctime)s [%(levelname)s] %(message)s',
-            datefmt='%m/%d/%Y %H:%M:%S',
-            level=logging.INFO)
+    logf = "/tmp/hls_service_%d.txt" % index
+    set_log_path(logf)
     logging.info("=====================\n\n")
     logging.info("run_hls_service begin")
     hls = HlsService(conn)
@@ -1466,20 +1429,20 @@ async def run_other_task():
         await asyncio.sleep(1)
 
 
+def do_test_coder():
+    coder = Transcoder()
+    coder.do_hlsvod("/tmp/test.mkv", "/tmp/output", [0, 0], 5)
+
 def do_test():
     #ftest = MediaExtm3u8()
     #ftest.open("index.m3u8", 5)
-    #print(ftest.last_seq, ftest.duration, ftest.probe_count, ftest.is_begin, ftest.is_end, ftest)
+    #print(ftest.last_seq, ftest.duration, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
+    #print(gst_make_h264_enc_profile(1024))
+    thread.start_new_thread(do_test_coder, ())
+    time.sleep(30)
     pass
 
 def do_main(srcPath, dstPath, maxCount):
-    logf = os.path.join(gLogPath, "hls_client.txt")
-    logf = "/dev/stdout"
-    logging.basicConfig(filename=logf, encoding='utf-8',
-            format='%(asctime)s [%(levelname)s] %(message)s',
-            datefmt='%m/%d/%Y %H:%M:%S',
-            level=logging.INFO)
-
     logging.info("=================\n\n")
     logging.info("start...")
 
@@ -1501,7 +1464,8 @@ def do_main(srcPath, dstPath, maxCount):
 
 # should use __main__ to support child-process
 if __name__ == "__main__":
-    do_test()
+    #set_log_path("/tmp/hls_client.txt")
     set_log_path(None)
+    #do_test()
     do_main(None, None, 1)
     sys.exit(0)
