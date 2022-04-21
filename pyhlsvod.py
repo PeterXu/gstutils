@@ -2,6 +2,11 @@
 # coding=utf-8
 # peterxu
 
+##
+## prepare gst-python
+## pip3 install aiohttp watchdog
+##
+
 import os
 import sys
 import re
