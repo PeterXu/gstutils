@@ -530,10 +530,9 @@ class MediaInfo(object):
             video = self.mediaType("video")
             if audio != None and audio != "audio/mpeg": return False
             if video != None and video != "video/x-h264": return False 
-            if self.fileSize() >= 50*1024*1024:   #50MB
-                if self.bitrate() >= 5*1024*1024: #5Mbps
-                    return False
-            return True
+            if self.fileSize() <= 100*1024*1024:  #100MB
+                if self.bitrate() <= 5*1024*1024: #5Mbps
+                    return True
         return False
 
     def parse(self, infile):
@@ -623,9 +622,88 @@ class Transcoder(object):
             else: sink = "%s %s=\"%s\"" % (sink, k, v)
 
         self.working = 1
-        self.do_work0(infile, 64, 1024, "video/mpegts", sink)
+        self.do_work1(infile, 64, 1024, "video/mpegts", sink)
         self.working = -1
         return
+
+    def on_pad_added(self, obj, pad):
+        caps = pad.get_current_caps()
+        szcaps = caps.to_string()
+        print(type(caps), szcaps)
+    def on_pad_probe(self, pad, info, ptype):
+        print(pad, info)
+        pass
+
+    def do_work1(self, infile, akbps, vkbps, outcaps, sink):
+        aac = gst_make_aac_enc_profile(akbps)
+        avc = gst_make_h264_enc_profile(vkbps)
+        mux = gst_make_mux_profile(outcaps)
+        logging.info("gst-coder, elems=%s, %s, %s", mux, avc, aac)
+        profile = "%s:%s:%s" % (mux, aac, avc)
+
+        start = self.start_pos
+        start = timecode_sec(start)
+
+        parts1 = []
+        parts1.append("filesrc location=\"%s\" name=fs" % infile)
+        parts1.append("parsebin name=pb")
+        parts1.append("proxysink name=psink0")
+        parts1.append("proxysink name=psink1")
+        parts1.append("fs. ! pb.")
+        parts1.append("pb.src_0 ! psink0.")
+        parts1.append("pb.src_1 ! psink1.")
+        sstr1 = " ".join(parts1)
+        p1 = Gst.parse_launch(sstr1)
+        psink0 = p1.get_by_name("psink0")
+        psink1 = p1.get_by_name("psink1")
+        logging.info(["gst-coder, sstr1", sstr1, p1, psink0, psink1])
+
+        parts2 = []
+        parts2.append("proxysrc name=psrc0")
+        parts2.append("proxysrc name=psrc1")
+        parts2.append("decodebin3 name=db")
+        parts2.append("encodebin profile=\"%s\" name=eb" % profile)
+        parts2.append("%s name=hs" % sink)
+
+        parts2.append("psrc0. ! db.sink_0")
+        parts2.append("psrc1. ! db.sink_1")
+        parts2.append("db.video_0 ! video/x-raw ! videoconvert ! eb.video_0")
+        parts2.append("db.audio_0 ! audio/x-raw ! audioconvert ! eb.audio_0")
+        parts2.append("eb. ! hs.")
+
+        sstr2 = " ".join(parts2)
+        p2 = Gst.parse_launch(sstr2)
+        psrc0 = p2.get_by_name("psrc0")
+        psrc1 = p2.get_by_name("psrc1")
+        logging.info(["gst-coder, sstr2", sstr2, p2, psrc0, psrc1])
+
+        #GObject.set(psrc, "proxysink", psink, NULL);
+        psrc0.set_property('proxysink', psink0)
+        psrc1.set_property('proxysink', psink1)
+
+        clock = Gst.SystemClock.obtain()
+        p1.use_clock(clock)
+        p2.use_clock(clock)
+        clock.unref()
+
+        p1.set_base_time(0)
+        p2.set_base_time(0)
+
+    
+        #self.check_run(p1)
+        self.pipeline = p1
+        bus = p1.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self.on_message)
+        self.loop = GLib.MainLoop()
+        p1.set_state(Gst.State.PLAYING)
+        p2.set_state(Gst.State.PLAYING)
+        self.loop.run()
+        print("end")
+
+    def on_error(self, bus, message):
+        print(message.parse_error())
+        pass
 
     def do_work0(self, infile, akbps, vkbps, outcaps, sink):
         aac = gst_make_aac_enc_profile(akbps)
@@ -678,7 +756,9 @@ class Transcoder(object):
                         for k, v in props.items():
                             e.set_property(k, v)
                             logging.info("gst-coder, set-props for <%s => %s:%s>", e.get_name(), k, v)
-            self.check_run()
+            db = self.pipeline.get_by_name("db")
+            if db: self.do_seek(db)
+            self.check_run(self.pipeline)
         except Exception as e:
             logging.info(["gst-coder, exception:", e, sstr])
 
@@ -691,19 +771,38 @@ class Transcoder(object):
             self.pipeline.set_state(Gst.State.PAUSED)
             self.state = int(Gst.State.PAUSED)
 
+    def do_eos(self):
+        self.pipeline.send_event(Gst.Event.new_eos())
+
+    def do_seek(self, elem):
+        logging.info("gst-coder, seek: %s", elem)
+        steps = 1500
+        self.pipeline.set_state(Gst.State.PAUSED)
+        self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        time.sleep(0.5)
+        #event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 1.0, True, False)
+        #event = Gst.Event.new_step(Gst.Format.TIME, steps * Gst.SECOND, 1.0, True, False)
+        event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.KEY_UNIT|Gst.SeekFlags.FLUSH,
+                Gst.SeekType.SET, steps * Gst.SECOND, Gst.SeekType.NONE, -1)
+        self.pipeline.send_event(event)
+        self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        time.sleep(0.5)
+        logging.info("gst-coder, seek end")
+
     # VOID_PENDING:0, NULL:1, READY:2, PAUSED:3, PLAYING:4
     def get_state(self):
         return self.state
 
-    def check_run(self):
-        bus = self.pipeline.get_bus()
+    def check_run(self, pline):
+        self.pipeline = pline
+        bus = pline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self.on_message)
 
         self.loop = GLib.MainLoop()
-        ret = self.pipeline.set_state(Gst.State.PLAYING)
+        ret = pline.set_state(Gst.State.PLAYING)
         self.state = int(Gst.State.PLAYING)
-        logging.info("gst-coder, run begin ret=%d", ret)
+        logging.info("gst-coder, run begin")
         try:
             self.loop.run()
         except Exception as e:
@@ -712,11 +811,12 @@ class Transcoder(object):
         else:
             logging.info("gst-coder, run end");
             pass
-        self.pipeline.set_state(Gst.State.NULL)
+        pline.set_state(Gst.State.NULL)
         self.state = int(Gst.State.NULL)
         pass
 
     def on_message(self, bus, msg):
+        #logging.info("message: %s", msg.type)
         if msg.type == Gst.MessageType.EOS:
             logging.info("gst-coder, message EOS and quit")
             self.pipeline.set_state(Gst.State.NULL)
@@ -727,6 +827,15 @@ class Transcoder(object):
             logging.info(["gst-coder, message Error:", err, debug])
             self.loop.quit()
         elif msg.type == Gst.MessageType.STATE_CHANGED:
+            pass
+        elif msg.type == Gst.MessageType.DURATION_CHANGED:
+            value = -1
+            ok, pos = self.pipeline.query_duration(Gst.Format.TIME)
+            #ok, pos = self.pipeline.query_position(Gst.Format.TIME)
+            if ok: value = int(float(pos) / Gst.SECOND)
+            print("yzxu", value)
+            #self.do_eos()
+            #self.loop.quit()
             pass
         pass
 
@@ -1433,7 +1542,7 @@ async def run_other_task():
 
 def do_test_coder():
     coder = Transcoder()
-    coder.do_hlsvod("/tmp/test.mkv", "/tmp/output", [0, 0], 5)
+    coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
 
 def do_test():
     #ftest = MediaExtm3u8()
@@ -1466,8 +1575,10 @@ def do_main(srcPath, dstPath, maxCount):
 
 # should use __main__ to support child-process
 if __name__ == "__main__":
-    #set_log_path("/tmp/hls_client.txt")
-    set_log_path(None)
-    #do_test()
-    do_main(None, None, 1)
+    logc = "/tmp/hls_client.txt"
+    logc = None
+    set_log_path(logc)
+    do_test()
+    #do_main("/disk0/deepnas/home", "/disk0/deepnas/cache", 1)
+    #do_main(None, None, 1)
     sys.exit(0)
