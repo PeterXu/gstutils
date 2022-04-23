@@ -626,14 +626,6 @@ class Transcoder(object):
         self.working = -1
         return
 
-    def on_pad_added(self, obj, pad):
-        caps = pad.get_current_caps()
-        szcaps = caps.to_string()
-        print(type(caps), szcaps)
-    def on_pad_probe(self, pad, info, ptype):
-        print(pad, info)
-        pass
-
     def do_work1(self, infile, akbps, vkbps, outcaps, sink):
         aac = gst_make_aac_enc_profile(akbps)
         avc = gst_make_h264_enc_profile(vkbps)
@@ -698,6 +690,7 @@ class Transcoder(object):
         self.loop = GLib.MainLoop()
         p1.set_state(Gst.State.PLAYING)
         p2.set_state(Gst.State.PLAYING)
+        self.do_seek(p1)
         self.loop.run()
         print("end")
 
@@ -776,7 +769,7 @@ class Transcoder(object):
 
     def do_seek(self, elem):
         logging.info("gst-coder, seek: %s", elem)
-        steps = 1500
+        steps = 50
         self.pipeline.set_state(Gst.State.PAUSED)
         self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
         time.sleep(0.5)
@@ -1542,7 +1535,7 @@ async def run_other_task():
 
 def do_test_coder():
     coder = Transcoder()
-    coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
+    coder.do_hlsvod("/tmp/test.mkv", "/tmp/output", 0, 5)
 
 def do_test():
     #ftest = MediaExtm3u8()
