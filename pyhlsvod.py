@@ -793,7 +793,7 @@ class HlsService:
 
     def is_coder_timeout(self):
         if self.last_coder_time != 0:
-            return nowtime() >= self.last_coder_time + 15*1000
+            return nowtime() >= self.last_coder_time + 30*1000
         return False
 
     def stop_coder(self):
@@ -846,7 +846,7 @@ class HlsService:
         for line in lines:
             if line.find("#EXT-X-TARGETDURATION:") == 0:
                 #extm.duration = hls_parse_prop(line, 0)
-                pass
+                continue
             elif line.find("#EXT-X-ENDLIST") == 0:
                 logging.info("hls-srv, changed with segment, dur: %d-%d", extm.curr_dur(), extm.media_dur)
                 if extm.is_complete():
@@ -937,8 +937,9 @@ class HlsService:
 
 
 def run_hls_service(conn, index):
-    logf = "/tmp/hls_service_%d.txt" % index
-    set_log_path(logf)
+    if pyver() >= 39:
+        logf = "/tmp/hls_service_%d.txt" % index
+        set_log_path(logf)
     logging.info("=====================\n\n")
     logging.info("run_hls_service begin")
     hls = HlsService(conn)
@@ -1170,6 +1171,7 @@ class MyHTTPRequestHandler:
             dst_fpath = os.path.join(self.hlsdir, source)
             m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
+                logging.warning("webhandler, m3u8 source not exists: %s", source)
                 return web.HTTPNotFound(reason="Source file not found")
 
             # parse
@@ -1259,7 +1261,7 @@ class MyHTTPRequestHandler:
 
     async def do_File(self, request):
         try:
-            #logging.info("do_File begin")
+            #logging.info(["do_File begin", request.url])
             headers = request.headers
             uri = request.match_info["uri"]
         except Exception as e:

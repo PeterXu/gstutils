@@ -1,6 +1,7 @@
 <html>
     <head>
         <title>streaming testing</title>
+        <meta http-equiv="Content-type" content="text/html; charset=utf-8"/>
         <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     </head>
     <body>
@@ -22,7 +23,10 @@
 
             var play = document.getElementById('btnPlay');
             play.onclick = function() {
-                playMedia('video', '/samples/test.mkv/index.m3u8');
+                var uri1 = '/samples/test中文.mkv/index.m3u8';
+                var uri2 = encodeURI(uri1);
+                console.log(uri1, uri2);
+                playMedia('video', uri2);
             };
         </script>
     </body>
