@@ -154,6 +154,7 @@ def gst_make_audio_props(name, kbps):
     bps = kbps * 1024
     props = {
         "faac": {"bitrate": bps},
+        "voaacenc": {"bitrate": bps},
         "avenc_aac": {"bitrate": bps},
     }
     for k, v in props.items():
@@ -173,6 +174,96 @@ def gst_make_video_props(name, kbps):
     for k, v in props.items():
         if name.find(k) == 0: return v
     return None
+def gst_mpp_dec(dec):
+    # vp8/vp9/h264/h265/mpeg
+    if gst_make_elem("mppvideodec"):
+        return "mppvideodec"
+    return dec
+
+def gst_find_items(prop, items):
+    for item in items:
+        if prop.find(item) != -1: return True
+    return False
+def gst_mux_type(prop):
+    if not prop: return None
+    if gst_find_items(prop, ["/quicktime", "/x-3gp", "/x-mj2", "/x-m4a"]):
+        return "qtmux"
+    if gst_find_items(prop, ["/x-matroska"]):
+        return "matroskamux"
+    if gst_find_items(prop, ["/webm"]):
+        return "webmmux"
+    if gst_find_items(prop, ["/mpegts"]):
+        return "mpegtsmux"
+    if gst_find_items(prop, ["/mpeg", "/x-cdxa"]):
+        return "mpegpsmux"
+    if gst_find_items(prop, ["/x-msvideo"]):
+        return "avimux"
+    if gst_find_items(prop, ["/ogg", "/kate"]):
+        return "oggmux"
+    if gst_find_items(prop, ["/x-flv"]):
+        return "flvmux"
+    return None
+def gst_audio_type(prop):
+    if not prop: return [None, None]
+    if gst_find_items(prop, ["audio/mpeg"]):
+        if gst_find_items(prop, ["mpegversion=(int)1"]):
+            dec = None
+            if gst_find_items(prop, ["layer=(int)1"]):
+                dec = "avdec_mp1float"
+            elif gst_find_items(prop, ["layer=(int)2"]):
+                dec = "avdec_mp2float"
+            elif gst_find_items(prop, ["layer=(int)3"]):
+                dec = "avdec_mp3"
+            return ["mpegaudioparse", dec]
+        if gst_find_items(prop, ["mpegversion=(int)2", "mpegversion=(int)4"]):
+            return ["aacparse", "avdec_aac"]
+    if gst_find_items(prop, ["audio/x-vorbis"]):
+        return ["vorbisparse", "vorbisdec"]
+    if gst_find_items(prop, ["audio/x-opus"]):
+        return ["opusparse", "avdec_opus"]
+    if gst_find_items(prop, ["audio/x-flac"]):
+        return ["flacparse", "avdec_flac"]
+    if gst_find_items(prop, ["audio/x-alaw", "audio/x-mulaw"]):
+        dec = "alawdec"
+        if gst_find_items(prop, ["audio/x-mulaw"]):
+            dec = "mulawdec"
+        return ["audioparse", dec]
+    if gst_find_items(prop, ["audio/x-ac3", "audio/ac3", "audio/x-private1-ac3", "audio/x-eac3"]):
+        dec = "avdec_ac3"
+        if gst_find_items(prop, ["audio/x-eac3"]):
+            dec = "avdec_eac3"
+        return ["ac3parse", dec]
+    return [None, None]
+def gst_video_type(prop):
+    if not prop: return [None, None]
+    if gst_find_items(prop, ["video/x-h264"]):
+        return ["h264parse", gst_mpp_dec("avdec_h264")]
+    if gst_find_items(prop, ["video/x-h265"]):
+        return ["h265parse", gst_mpp_dec("avdec_h265")]
+    if gst_find_items(prop, ["video/mpeg"]):
+        if gst_find_items(prop, ["mpegversion=(int)1", "mpegversion=(int)2"]):
+            dec = "avdec_mpegvideo"
+            if gst_find_items(prop, ["mpegversion=(int)2"]):
+                dec = "avdec_mpeg2video"
+            return ["mpegvideoparse", gst_mpp_dec(dec)]
+        if gst_find_items(prop, ["mpegversion=(int)4"]):
+            return ["mpeg4videoparse", gst_mpp_dec("avdec_mpeg4")]
+    if gst_find_items(prop, ["video/x-h263"]):
+        return ["h263parse", "avdec_h263"]
+    if gst_find_items(prop, ["video/x-vp8"]):
+        return [None, gst_mpp_dec("vp8dec")]
+    if gst_find_items(prop, ["video/x-vp9"]):
+        return [None, gst_mpp_dec("vp9dec")]
+    if gst_find_items(prop, ["video/x-theora"]):
+        return ["theoraparse", "theoradec"]
+    if gst_find_items(prop, ["video/x-divx"]):
+        if gst_find_items(prop, ["divxversion=(int)4", "divxversion=(int)5"]):
+            return ["mpeg4videoparse", "avdec_mpeg4"]
+    if gst_find_items(prop, ["video/x-wmv"]):
+        if gst_find_items(prop, ["wmvversion=(int)3"]):
+            if not gst_find_items(prop, ["format=WMV3"]):
+                return ["vc1parse", "avdec_vc1"]
+    return [None, None]
 
 def gst_parse_props(line, key):
     if line.find(key) == -1: return {}
@@ -180,6 +271,7 @@ def gst_parse_props(line, key):
     if not ret or len(ret.groups()) == 0: return {}
     #print(ret.groups())
     props = {}
+    props["detail"] = line
     props["type"] = ret.groups()[0]
     props["more"] = {}
     if len(ret.groups()) >= 2:
@@ -523,6 +615,15 @@ class MediaInfo(object):
         if type(value) == int: return value
         return gst_parse_value(value)
 
+    def muxType(self):
+        return gst_mux_type(self.info.get("mux", {}).get("detail"))
+
+    def audioType(self):
+        return gst_audio_type(self.info.get("audio", {}).get("detail"))
+
+    def videoType(self):
+        return gst_video_type(self.info.get("video", {}).get("detail"))
+
     def isWebDirectSupport(self):
         mux = self.mediaType("mux")
         if mux == "video/quicktime" or mux == "application/x-3gp" or mux == "audio/x-m4a":
@@ -622,11 +723,11 @@ class Transcoder(object):
             else: sink = "%s %s=\"%s\"" % (sink, k, v)
 
         self.working = 1
-        self.do_work1(infile, 64, 1024, "video/mpegts", sink)
+        self.do_work(infile, 64, 1024, "video/mpegts", sink)
         self.working = -1
         return
 
-    def do_work1(self, infile, akbps, vkbps, outcaps, sink):
+    def do_work(self, infile, akbps, vkbps, outcaps, sink):
         aac = gst_make_aac_enc_profile(akbps)
         avc = gst_make_h264_enc_profile(vkbps)
         mux = gst_make_mux_profile(outcaps)
@@ -634,7 +735,19 @@ class Transcoder(object):
         profile = "%s:%s:%s" % (mux, aac, avc)
 
         start = self.start_pos
-        start = timecode_sec(start)
+        #start = timecode_sec(start)
+
+        minfo = MediaInfo()
+        if not minfo.parse(infile):
+            logging.warning("gst-coder, invalid media")
+            return
+        muxType = minfo.muxType()
+        aType = minfo.audioType()
+        vType = minfo.videoType()
+        logging.info(["gst-coder, media-type:", muxType, aType, vType])
+        if not aType[1] and not vType[1]:
+            logging.warning("gst-coder, media-type no decoder")
+            return
 
         parts1 = []
         parts1.append("filesrc location=\"%s\" name=fs" % infile)
@@ -653,18 +766,34 @@ class Transcoder(object):
         parts2 = []
         parts2.append("proxysrc name=psrc0")
         parts2.append("proxysrc name=psrc1")
-        parts2.append("decodebin3 name=db")
         parts2.append("encodebin profile=\"%s\" name=eb" % profile)
-        parts2.append("%s name=hs" % sink)
-
-        parts2.append("psrc0. ! db.sink_0")
-        parts2.append("psrc1. ! db.sink_1")
-        parts2.append("db.video_0 ! video/x-raw ! videoconvert ! eb.video_0")
-        parts2.append("db.audio_0 ! audio/x-raw ! audioconvert ! eb.audio_0")
-        parts2.append("eb. ! hs.")
+        #parts2.append("filesink location=/tmp/test3.ts name=fs")
+        parts2.append("%s name=fs" % sink)
+        vdec = vType[1]
+        if vType[0]: vdec = " ! ".join(vType)
+        adec = aType[1]
+        if aType[0]: adec = " ! ".join(aType)
+        if vdec:
+            parts2.append("psrc0. ! %s ! queue ! eb.video_0" % vdec)
+        if adec:
+            parts2.append("psrc1. ! %s ! queue ! eb.audio_0" % adec)
+        parts2.append("eb. ! fs.")
 
         sstr2 = " ".join(parts2)
         p2 = Gst.parse_launch(sstr2)
+        eb = p2.get_by_name("eb")
+        if eb:
+            for i in range(eb.get_children_count()):
+                e = eb.get_child_by_index(i)
+                props = gst_make_audio_props(e.get_name(), akbps)
+                if not props: props = gst_make_video_props(e.get_name(), vkbps)
+                if props:
+                    logging.info("gst-coder, set-props for <%s>", e.get_name())
+                    for k, v in props.items():
+                        e.set_property(k, v)
+                        logging.info("gst-coder, set-props for <%s => %s:%s>", e.get_name(), k, v)
+                else:
+                    logging.info("gst-coder, set-props no for <%s>", e.get_name())
         psrc0 = p2.get_by_name("psrc0")
         psrc1 = p2.get_by_name("psrc1")
         logging.info(["gst-coder, sstr2", sstr2, p2, psrc0, psrc1])
@@ -681,8 +810,7 @@ class Transcoder(object):
         p1.set_base_time(0)
         p2.set_base_time(0)
 
-    
-        #self.check_run(p1)
+        #print("begin", p1, p2)
         self.pipeline = p1
         bus = p1.get_bus()
         bus.add_signal_watch()
@@ -690,70 +818,14 @@ class Transcoder(object):
         self.loop = GLib.MainLoop()
         p1.set_state(Gst.State.PLAYING)
         p2.set_state(Gst.State.PLAYING)
-        self.do_seek(p1)
+        if start > 0:
+            self.do_seek(p1, start)
         self.loop.run()
         print("end")
 
     def on_error(self, bus, message):
         print(message.parse_error())
         pass
-
-    def do_work0(self, infile, akbps, vkbps, outcaps, sink):
-        aac = gst_make_aac_enc_profile(akbps)
-        avc = gst_make_h264_enc_profile(vkbps)
-        mux = gst_make_mux_profile(outcaps)
-        logging.info("gst-coder, elems=%s, %s, %s", mux, avc, aac)
-        profile = "%s:%s:%s" % (mux, aac, avc)
-        minfo = MediaInfo()
-        if not minfo.parse(infile):
-            return
-
-        start = self.start_pos
-        if start > 0: start += 1
-        if start >= minfo.duration(): start = minfo.duration()-1
-        start = timecode_sec(start)
-
-        parts = []
-        parts.append("filesrc location=\"%s\" name=fs" % infile)
-        parts.append("decodebin3 name=db")
-        parts.append("encodebin profile=\"%s\" name=eb" % profile)
-        parts.append("%s name=hs" % sink)
-        parts.append("avwait name=wait target-timecode-string=\"%s\"" % start)
-
-        parts.append("fs. ! db.")
-        if minfo.hasAudio() and minfo.hasVideo():
-            parts.append("db.audio_0 ! audio/x-raw ! audioconvert ! queue ! wait.")
-            parts.append("wait. ! queue ! eb.audio_0")
-            parts.append("db.video_0 ! video/x-raw ! videoconvert ! queue ! timecodestamper ! wait.")
-            parts.append("wait. ! queue ! eb.video_0")
-        elif minfo.hasVideo():
-            parts.append("db.video_0 ! video/x-raw ! videoconvert ! queue ! timecodestamper ! wait.")
-            parts.append("wait. ! queue ! eb.video_0")
-        else:
-            parts.append("db.audio_0 ! audio/x-raw ! audioconvert ! queue ! eb.audio_0")
-        parts.append("eb. ! hs.")
-        sstr = " ".join(parts)
-        logging.info("gst-coder, sstr=%s", sstr)
-
-        try:
-            self.pipeline = Gst.parse_launch(sstr)
-            logging.info("gst-coder, pipeline=%s", self.pipeline)
-            eb = self.pipeline.get_by_name("eb")
-            if eb:
-                for i in range(eb.get_children_count()):
-                    e = eb.get_child_by_index(i)
-                    props = gst_make_audio_props(e.get_name(), akbps)
-                    if not props: props = gst_make_video_props(e.get_name(), vkbps)
-                    if props:
-                        logging.info("gst-coder, set-props for <%s>", e.get_name())
-                        for k, v in props.items():
-                            e.set_property(k, v)
-                            logging.info("gst-coder, set-props for <%s => %s:%s>", e.get_name(), k, v)
-            db = self.pipeline.get_by_name("db")
-            if db: self.do_seek(db)
-            self.check_run(self.pipeline)
-        except Exception as e:
-            logging.info(["gst-coder, exception:", e, sstr])
 
     def do_stop(self):
         if self.loop and self.pipeline:
@@ -767,19 +839,17 @@ class Transcoder(object):
     def do_eos(self):
         self.pipeline.send_event(Gst.Event.new_eos())
 
-    def do_seek(self, elem):
-        logging.info("gst-coder, seek: %s", elem)
-        steps = 50
+    def do_seek(self, elem, steps):
+        logging.info(["gst-coder, seek:", elem, steps])
+        #steps = 1000
         self.pipeline.set_state(Gst.State.PAUSED)
         self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
         time.sleep(0.5)
-        #event = Gst.Event.new_step(Gst.Format.BUFFERS, steps, 1.0, True, False)
-        #event = Gst.Event.new_step(Gst.Format.TIME, steps * Gst.SECOND, 1.0, True, False)
-        event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.KEY_UNIT|Gst.SeekFlags.FLUSH,
+        event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH|Gst.SeekFlags.KEY_UNIT,
                 Gst.SeekType.SET, steps * Gst.SECOND, Gst.SeekType.NONE, -1)
         self.pipeline.send_event(event)
         self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
-        time.sleep(0.5)
+        time.sleep(1)
         logging.info("gst-coder, seek end")
 
     # VOID_PENDING:0, NULL:1, READY:2, PAUSED:3, PLAYING:4
@@ -1535,7 +1605,8 @@ async def run_other_task():
 
 def do_test_coder():
     coder = Transcoder()
-    coder.do_hlsvod("/tmp/test.mkv", "/tmp/output", 0, 5)
+    #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
+    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 10, 5)
 
 def do_test():
     #ftest = MediaExtm3u8()
