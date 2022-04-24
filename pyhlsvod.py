@@ -164,7 +164,7 @@ def gst_make_video_props(name, kbps):
     bps = kbps * 1024
     props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main",}
     props2 = {"pass":"pass1", "bitrate":bps, "profile":"main"}
-    props3 = {"pass":"pass1", "bitrate":bps}
+    props3 = {"pass":"pass1", "bitrate":kbps}
     props = {
         "mpph264enc": props1,
         "avenc_h264_videotoolbox": props2,
@@ -755,8 +755,10 @@ class Transcoder(object):
         parts1.append("proxysink name=psink0")
         parts1.append("proxysink name=psink1")
         parts1.append("fs. ! pb.")
-        parts1.append("pb.src_0 ! psink0.")
-        parts1.append("pb.src_1 ! psink1.")
+        parts1.append("pb.src_0 ! mpeg4videoparse ! queue ! avdec_mpeg4 ! psink0.")
+        parts1.append("pb.src_1 ! aacparse ! queue ! avdec_aac ! psink1.")
+        #parts1.append("db.video_0 ! psink0.")
+        #parts1.append("db.audio_0 ! psink1.")
         sstr1 = " ".join(parts1)
         p1 = Gst.parse_launch(sstr1)
         psink0 = p1.get_by_name("psink0")
@@ -766,18 +768,16 @@ class Transcoder(object):
         parts2 = []
         parts2.append("proxysrc name=psrc0")
         parts2.append("proxysrc name=psrc1")
-        parts2.append("encodebin profile=\"%s\" name=eb" % profile)
-        #parts2.append("filesink location=/tmp/test3.ts name=fs")
-        parts2.append("%s name=fs" % sink)
-        vdec = vType[1]
-        if vType[0]: vdec = " ! ".join(vType)
-        adec = aType[1]
-        if aType[0]: adec = " ! ".join(aType)
-        if vdec:
-            parts2.append("psrc0. ! %s ! queue ! eb.video_0" % vdec)
-        if adec:
-            parts2.append("psrc1. ! %s ! queue ! eb.audio_0" % adec)
-        parts2.append("eb. ! fs.")
+        #parts2.append("encodebin profile=\"%s\" name=eb" % profile)
+        parts2.append("filesink location=/tmp/test3.ts name=fs")
+        #parts2.append("%s name=fs" % sink)
+        #parts2.append("psrc0. ! queue ! eb.video_0")
+        #parts2.append("psrc1. ! queue ! audioconvert ! eb.audio_0")
+        #parts2.append("eb. ! fs.")
+        parts2.append("mpegtsmux name=mux")
+        parts2.append("psrc0. ! videoconvert ! queue ! x264enc bitrate=1024 ! queue ! mux.")
+        parts2.append("psrc1. ! audioconvert ! queue ! avenc_aac bitrate=64000 ! queue ! mux.")
+        parts2.append("mux. ! fs.")
 
         sstr2 = " ".join(parts2)
         p2 = Gst.parse_launch(sstr2)
@@ -818,8 +818,7 @@ class Transcoder(object):
         self.loop = GLib.MainLoop()
         p1.set_state(Gst.State.PLAYING)
         p2.set_state(Gst.State.PLAYING)
-        if start > 0:
-            self.do_seek(p1, start)
+        if start > 0: self.do_seek(p1, start)
         self.loop.run()
         print("end")
 
@@ -1606,7 +1605,7 @@ async def run_other_task():
 def do_test_coder():
     coder = Transcoder()
     #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 10, 5)
+    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 50, 5)
 
 def do_test():
     #ftest = MediaExtm3u8()
