@@ -164,7 +164,7 @@ def gst_find_items(prop, items):
     for item in items:
         if prop.find(item) != -1: return True
     return False
-def gst_mux_type(prop):
+def gst_mux_name(prop):
     if not prop: return None
     if gst_find_items(prop, ["/quicktime", "/x-3gp", "/x-mj2", "/x-m4a"]):
         return "qtmux"
@@ -183,7 +183,7 @@ def gst_mux_type(prop):
     if gst_find_items(prop, ["/x-flv"]):
         return "flvmux"
     return None
-def gst_audio_type(prop):
+def gst_audio_dec(prop):
     if not prop: return [None, None]
     if gst_find_items(prop, ["audio/mpeg"]):
         if gst_find_items(prop, ["mpegversion=(int)1"]):
@@ -214,7 +214,7 @@ def gst_audio_type(prop):
             dec = "avdec_eac3"
         return ["ac3parse", dec]
     return [None, None]
-def gst_video_type(prop):
+def gst_video_dec(prop):
     if not prop: return [None, None]
     if gst_find_items(prop, ["video/x-h264"]):
         return ["h264parse", gst_mpp_dec("avdec_h264")]
@@ -574,11 +574,11 @@ class MediaInfo(object):
     def mediaType(self, kind): #mux/audio/video
         return self.info.get(kind, {}).get("type", None)
 
-    def hasAudio(self):
-        return self.mediaType("audio") != None
+    def audioType(self):
+        return self.mediaType("audio")
 
-    def hasVideo(self):
-        return self.mediaType("video") != None
+    def videoType(self):
+        return self.mediaType("video")
 
     def frameRate(self):
         value = self.info.get("video", {}).get("more", {}).get("framerate", 0)
@@ -595,14 +595,14 @@ class MediaInfo(object):
         if type(value) == int: return value
         return gst_parse_value(value)
 
-    def muxType(self):
-        return gst_mux_type(self.info.get("mux", {}).get("detail"))
+    def muxName(self):
+        return gst_mux_name(self.info.get("mux", {}).get("detail"))
 
-    def audioType(self):
-        return gst_audio_type(self.info.get("audio", {}).get("detail"))
+    def audioDec(self):
+        return gst_audio_dec(self.info.get("audio", {}).get("detail"))
 
-    def videoType(self):
-        return gst_video_type(self.info.get("video", {}).get("detail"))
+    def videoDec(self):
+        return gst_video_dec(self.info.get("video", {}).get("detail"))
 
     def isWebDirectSupport(self):
         mux = self.mediaType("mux")
@@ -623,6 +623,8 @@ class MediaInfo(object):
         self.info = info
         if self.duration() == 0:
             return False
+        if not self.videoType() and not self.audioType():
+            return False
         try:
             fp = open(infile, "rb")
             fs = os.fstat(fp.fileno())
@@ -636,13 +638,13 @@ class MediaInfo(object):
             pass
         #print(info)
         #logging.info(["coder media:", info])
-        if self.hasVideo():
+        if self.videoType():
             fps = self.frameRate()
             width = self.width()
             height = self.height()
             if fps == 0 or width == 0 or height == 0:
                 return False
-            logging.info("coder video: %dx%d@%d", width, height, fps)
+            logging.info(["coder video", width, height, fps])
         else:
             logging.info("coder no video")
         return True
@@ -698,14 +700,10 @@ class Transcoder(object):
             logging.warning(["gst-coder, invalid media file:", infile])
             return
 
-        muxType = minfo.muxType()
+        muxName = minfo.muxName()
         aType = minfo.audioType()
         vType = minfo.videoType()
-        logging.info(["gst-coder, media-type:", muxType, aType, vType])
-
-        if not aType[1] and not vType[1]:
-            logging.warning("gst-coder, media-type no decoder")
-            return
+        logging.info(["gst-coder, media-type:", muxName, aType, vType])
 
         #pipeline1
         parts1 = []
@@ -714,8 +712,8 @@ class Transcoder(object):
         parts1.append("proxysink name=psink0")
         parts1.append("proxysink name=psink1")
         parts1.append("fs. ! pb.")
-        parts1.append("pb.src_0 ! %s ! queue ! psink0." % vType[0])
-        parts1.append("pb.src_1 ! %s ! queue ! psink1." % aType[0])
+        if vType: parts1.append("pb. ! %s ! queue ! psink0." % vType)
+        if aType: parts1.append("pb. ! %s ! queue ! psink1." % aType)
         sstr1 = " ".join(parts1)
         p1 = Gst.parse_launch(sstr1)
         psink0 = p1.get_by_name("psink0")
@@ -1534,13 +1532,13 @@ class MyHTTPRequestHandler:
 
 
 async def run_web_server(handler):
+    print("main, start server: localhost:8001")
     app = web.Application(middlewares=[])
     app.add_routes([
         web.get(r'/{uri:.*}', handler.do_File),
         ])
     runner = web.AppRunner(app)
     await runner.setup()
-    print("start server...")
     site = web.TCPSite(runner, 'localhost', 8001)
     await site.start()
 
@@ -1564,7 +1562,7 @@ def do_test():
     pass
 
 def do_main(srcPath, dstPath, maxCount):
-    print("start...")
+    print("main, start...")
     try:
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
         handler.init()
@@ -1575,7 +1573,7 @@ def do_main(srcPath, dstPath, maxCount):
         loop.run_forever()
     except:
         print()
-        print("quit for exception")
+        print("main, quit for exception")
     finally:
         handler.uninit()
     print()
@@ -1583,7 +1581,7 @@ def do_main(srcPath, dstPath, maxCount):
 
 # should use __main__ to support child-process
 if __name__ == "__main__":
-    do_test()
+    #do_test()
     #do_main("/disk0/deepnas/home", "/disk0/deepnas/cache", 1)
-    #do_main(None, None, 1)
+    do_main(None, None, 1)
     sys.exit(0)
