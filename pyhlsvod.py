@@ -2,10 +2,8 @@
 # coding=utf-8
 # peterxu
 
-##
 ## prepare gst-python
 ## pip3 install aiohttp watchdog
-##
 
 import os
 import sys
@@ -83,20 +81,6 @@ def tonumber(val, default=None):
         except: pass
     return ret
 
-def timecode_sec(s):
-    if s <= 0: s = 0
-    m, s = divmod(s, 60)
-    h, m = divmod(m, 60)
-    return "%02u:%02u:%02u:00" % (h, m, s)
-
-def gen_hex_string(length):
-    sets = "0123456789ABCDEF"
-    return ''.join(random.choice(sets) for i in range(length))
-
-def gen_uuid():
-    items = [gen_hex_string(val) for val in [8, 4, 4, 4, 12]]
-    return '-'.join(items)
-
 async def wait_file_exist(fname, timeout=0):
     if os.path.exists(fname): return True
     if timeout == 0: return False
@@ -138,12 +122,8 @@ def gst_make_filter(fmt): # "video/x-raw", "audio/x-raw"
 def gst_check_elem(name):
     if gst_make_elem(name): return name
     else: return None
-def gst_make_mux_profile(caps):
-    if caps == "video/mpegts":
-        return "video/mpegts,systemstream=true,packetsize=188"
-    elif caps == "video/quicktime":
-        return "video/quicktime"
-    return "video/x-matroska"
+def gst_make_mux_profile():
+    return "video/mpegts,systemstream=true,packetsize=188"
 def gst_make_aac_enc_profile(kbps):
     bps = kbps * 1024
     return "audio/mpeg,mpegversion=4,bitrate=%s" % bps
@@ -675,31 +655,12 @@ class Transcoder(object):
         self.state = -1
         self.loop = None
         self.pipeline = None
-        self.start_pos = [0, 0]
-        self.buffer_count = -1
-        self.map_count = {}
+        self.pipeline2 = None
+        self.start_pos = 0
         pass
 
     def outdated(self):
         return self.working == -1
-
-    def get_count(self, dur):
-        self.mutex.acquire()
-        count = self.map_count.get(int(dur), 0)
-        self.mutex.release()
-        return count
-
-    def set_count(self, dur, count):
-        self.mutex.acquire()
-        if dur < 0 or count < 0:
-            self.buffer_count = 0
-            self.map_count = {}
-        else:
-            self.buffer_count += count
-            self.map_count[int(dur)] = self.buffer_count
-        count2 = self.buffer_count
-        self.mutex.release()
-        return count2
 
     def do_hlsvod(self, infile, outpath, inpos, duration):
         logging.info("gst-coder, %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
@@ -716,69 +677,65 @@ class Transcoder(object):
         }
 
         self.start_pos = inpos
-        self.set_count(-1, -1)
         sink = "hlssink"
         for k,v in options.items():
             if type(v) == int: sink = "%s %s=%s" % (sink, k, v)
             else: sink = "%s %s=\"%s\"" % (sink, k, v)
 
         self.working = 1
-        self.do_work(infile, 64, 1024, "video/mpegts", sink)
+        self.do_work(infile, 64, 1024, sink)
         self.working = -1
-        return
 
-    def do_work(self, infile, akbps, vkbps, outcaps, sink):
+    def do_work(self, infile, akbps, vkbps, sink):
+        mux = gst_make_mux_profile()
         aac = gst_make_aac_enc_profile(akbps)
         avc = gst_make_h264_enc_profile(vkbps)
-        mux = gst_make_mux_profile(outcaps)
-        logging.info("gst-coder, elems=%s, %s, %s", mux, avc, aac)
+        logging.info(["gst-coder, elems=", mux, aac, avc])
         profile = "%s:%s:%s" % (mux, aac, avc)
-
-        start = self.start_pos
-        #start = timecode_sec(start)
 
         minfo = MediaInfo()
         if not minfo.parse(infile):
-            logging.warning("gst-coder, invalid media")
+            logging.warning(["gst-coder, invalid media file:", infile])
             return
+
         muxType = minfo.muxType()
         aType = minfo.audioType()
         vType = minfo.videoType()
         logging.info(["gst-coder, media-type:", muxType, aType, vType])
+
         if not aType[1] and not vType[1]:
             logging.warning("gst-coder, media-type no decoder")
             return
 
+        #pipeline1
         parts1 = []
         parts1.append("filesrc location=\"%s\" name=fs" % infile)
         parts1.append("parsebin name=pb")
         parts1.append("proxysink name=psink0")
         parts1.append("proxysink name=psink1")
         parts1.append("fs. ! pb.")
-        parts1.append("pb.src_0 ! mpeg4videoparse ! queue ! avdec_mpeg4 ! psink0.")
-        parts1.append("pb.src_1 ! aacparse ! queue ! avdec_aac ! psink1.")
-        #parts1.append("db.video_0 ! psink0.")
-        #parts1.append("db.audio_0 ! psink1.")
+        parts1.append("pb.src_0 ! %s ! queue ! psink0." % vType[0])
+        parts1.append("pb.src_1 ! %s ! queue ! psink1." % aType[0])
         sstr1 = " ".join(parts1)
         p1 = Gst.parse_launch(sstr1)
         psink0 = p1.get_by_name("psink0")
         psink1 = p1.get_by_name("psink1")
-        logging.info(["gst-coder, sstr1", sstr1, p1, psink0, psink1])
+        logging.info(["gst-coder, pipeline1:", sstr1, p1, psink0, psink1])
 
+        #pipelin2
         parts2 = []
         parts2.append("proxysrc name=psrc0")
         parts2.append("proxysrc name=psrc1")
-        #parts2.append("encodebin profile=\"%s\" name=eb" % profile)
-        parts2.append("filesink location=/tmp/test3.ts name=fs")
-        #parts2.append("%s name=fs" % sink)
-        #parts2.append("psrc0. ! queue ! eb.video_0")
-        #parts2.append("psrc1. ! queue ! audioconvert ! eb.audio_0")
-        #parts2.append("eb. ! fs.")
-        parts2.append("mpegtsmux name=mux")
-        parts2.append("psrc0. ! videoconvert ! queue ! x264enc bitrate=1024 ! queue ! mux.")
-        parts2.append("psrc1. ! audioconvert ! queue ! avenc_aac bitrate=64000 ! queue ! mux.")
-        parts2.append("mux. ! fs.")
+        parts2.append("decodebin3 name=db")
+        parts2.append("encodebin profile=\"%s\" name=eb" % profile)
+        #parts2.append("filesink location=/tmp/test3.ts name=fs")
+        parts2.append("%s name=fs" % sink)
 
+        parts2.append("psrc0. ! db.sink_0")
+        parts2.append("psrc1. ! db.sink_1")
+        parts2.append("db.video_0 ! queue ! eb.video_0")
+        parts2.append("db.audio_0 ! queue ! eb.audio_0")
+        parts2.append("eb. ! fs.")
         sstr2 = " ".join(parts2)
         p2 = Gst.parse_launch(sstr2)
         eb = p2.get_by_name("eb")
@@ -788,46 +745,43 @@ class Transcoder(object):
                 props = gst_make_audio_props(e.get_name(), akbps)
                 if not props: props = gst_make_video_props(e.get_name(), vkbps)
                 if props:
-                    logging.info("gst-coder, set-props for <%s>", e.get_name())
                     for k, v in props.items():
+                        logging.info(["gst-coder, set-props:", e.get_name(), k, v])
                         e.set_property(k, v)
-                        logging.info("gst-coder, set-props for <%s => %s:%s>", e.get_name(), k, v)
                 else:
-                    logging.info("gst-coder, set-props no for <%s>", e.get_name())
+                    logging.info(["gst-coder, skip set-props:", e.get_name()])
         psrc0 = p2.get_by_name("psrc0")
         psrc1 = p2.get_by_name("psrc1")
-        logging.info(["gst-coder, sstr2", sstr2, p2, psrc0, psrc1])
+        logging.info(["gst-coder, pipeline2:", sstr2, p2, psrc0, psrc1])
 
+        # connect p1 and p2
         #GObject.set(psrc, "proxysink", psink, NULL);
         psrc0.set_property('proxysink', psink0)
         psrc1.set_property('proxysink', psink1)
-
+    
+        # set clock and time
         clock = Gst.SystemClock.obtain()
         p1.use_clock(clock)
         p2.use_clock(clock)
         clock.unref()
-
         p1.set_base_time(0)
         p2.set_base_time(0)
 
-        #print("begin", p1, p2)
+        # set p1 as default pipeline
         self.pipeline = p1
-        bus = p1.get_bus()
-        bus.add_signal_watch()
-        bus.connect("message", self.on_message)
-        self.loop = GLib.MainLoop()
+        self.pipeline2 = p2
         p1.set_state(Gst.State.PLAYING)
         p2.set_state(Gst.State.PLAYING)
-        if start > 0: self.do_seek(p1, start)
-        self.loop.run()
-        print("end")
-
-    def on_error(self, bus, message):
-        print(message.parse_error())
-        pass
+        self.do_seek(p1, self.start_pos)
+        self.check_message(p2)
+        self.check_run(p1)
+        p1.set_state(Gst.State.NULL)
+        p2.set_state(Gst.State.NULL)
 
     def do_stop(self):
         if self.loop and self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline2.set_state(Gst.State.NULL)
             self.loop.quit()
 
     def do_pause(self):
@@ -835,19 +789,22 @@ class Transcoder(object):
             self.pipeline.set_state(Gst.State.PAUSED)
             self.state = int(Gst.State.PAUSED)
 
-    def do_eos(self):
-        self.pipeline.send_event(Gst.Event.new_eos())
+    def do_eos(self, pline):
+        if not pline: pline = self.pipeline
+        if pline: pline.send_event(Gst.Event.new_eos())
 
-    def do_seek(self, elem, steps):
-        logging.info(["gst-coder, seek:", elem, steps])
-        #steps = 1000
-        self.pipeline.set_state(Gst.State.PAUSED)
-        self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+    def do_seek(self, pline, steps):
+        if not pline: pline = self.pipeline
+        if not pline: return
+        if steps <= 0: return
+        logging.info(["gst-coder, seek:", pline, steps])
+        pline.set_state(Gst.State.PAUSED)
+        pline.get_state(Gst.CLOCK_TIME_NONE)
         time.sleep(0.5)
         event = Gst.Event.new_seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH|Gst.SeekFlags.KEY_UNIT,
                 Gst.SeekType.SET, steps * Gst.SECOND, Gst.SeekType.NONE, -1)
-        self.pipeline.send_event(event)
-        self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        pline.send_event(event)
+        pline.get_state(Gst.CLOCK_TIME_NONE)
         time.sleep(1)
         logging.info("gst-coder, seek end")
 
@@ -855,12 +812,16 @@ class Transcoder(object):
     def get_state(self):
         return self.state
 
-    def check_run(self, pline):
-        self.pipeline = pline
+    def check_message(self, pline=None):
+        if not pline: pline = self.pipeline
+        if not pline: return
         bus = pline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self.on_message)
 
+    def check_run(self, pline=None):
+        if not pline: pline = self.pipeline
+        if not pline: return
         self.loop = GLib.MainLoop()
         ret = pline.set_state(Gst.State.PLAYING)
         self.state = int(Gst.State.PLAYING)
@@ -869,36 +830,28 @@ class Transcoder(object):
             self.loop.run()
         except Exception as e:
             logging.warning("gst-coder, run error=%s", e);
-            pass
         else:
             logging.info("gst-coder, run end");
-            pass
-        pline.set_state(Gst.State.NULL)
         self.state = int(Gst.State.NULL)
         pass
 
     def on_message(self, bus, msg):
         #logging.info("message: %s", msg.type)
+        pline = self.pipeline
         if msg.type == Gst.MessageType.EOS:
             logging.info("gst-coder, message EOS and quit")
-            self.pipeline.set_state(Gst.State.NULL)
-            self.loop.quit()
+            self.do_stop()
         elif msg.type == Gst.MessageType.ERROR:
-            self.pipeline.set_state(Gst.State.NULL)
             err, debug = msg.parse_error()
             logging.info(["gst-coder, message Error:", err, debug])
-            self.loop.quit()
+            self.do_stop()
         elif msg.type == Gst.MessageType.STATE_CHANGED:
             pass
         elif msg.type == Gst.MessageType.DURATION_CHANGED:
             value = -1
-            ok, pos = self.pipeline.query_duration(Gst.Format.TIME)
-            #ok, pos = self.pipeline.query_position(Gst.Format.TIME)
+            ok, pos = pline.query_duration(Gst.Format.TIME)
             if ok: value = int(float(pos) / Gst.SECOND)
-            print("yzxu", value)
-            #self.do_eos()
-            #self.loop.quit()
-            pass
+            logging.info(["gst-coder, duration:", value])
         pass
 
 
@@ -951,11 +904,6 @@ class HlsService:
         if self.coder and self.coder.outdated():
             self._reset()
         return self.coder
-
-    def get_coder_count(self, dur):
-        coder = self.get_coder()
-        if coder: return coder.get_count(dur)
-        return -1
 
     def is_coder_alive(self):
         coder = self.get_coder()
@@ -1108,9 +1056,8 @@ class HlsService:
 
 
 def run_hls_service(conn, index):
-    if pyver() >= 39:
-        logf = "/tmp/hls_service_%d.txt" % index
-        set_log_path(logf)
+    logf = "/tmp/hls_service_%d.txt" % index
+    set_log_path(logf)
     logging.info("=====================\n\n")
     logging.info("run_hls_service begin")
     hls = HlsService(conn)
@@ -1158,15 +1105,15 @@ class HlsClient:
     def on_backend_message(self, msg):
         self.last_backend_time = nowtime()
         if not msg:
-            logging.warning("hls-cli, invalid msg: %s", msg)
+            print("hls-cli, invalid msg:", msg)
             return
-        #logging.info("hls-cli, recv msg: %s", msg)
+        #print("hls-cli, recv msg:", msg)
         if msg.mtype == "status" or msg.result is True:
-            #logging.info("hls-cli, recv update: %s", msg.name)
+            #print("hls-cli, recv update:", msg.name)
             self.source = msg.name
             self.tmp_source = None
         if msg.result is False:
-            #logging.info("hls-cli, recv error: %s", msg.name)
+            #print("hls-cli, recv error:", msg.name)
             if msg.name == self.tmp_source:
                 self.tmp_source = None
         pass
@@ -1182,10 +1129,10 @@ class HlsClient:
         self.child.kill()
 
     def _service(self):
-        logging.info("hls-cli, run backend begin")
+        print("hls-cli, run backend begin")
         self.child.join()
         self.set_alive(False)
-        logging.info("hls-cli, run backend end")
+        print("hls-cli, run backend end")
 
     def _listen(self):
         while self.alive:
@@ -1195,7 +1142,7 @@ class HlsClient:
                     msg = self.conn.recv()
                     self.on_backend_message(msg)
             except Exception as e:
-                logging.warning("hls-cli, poll err: %s", e)
+                print("hls-cli, poll err: %s", e)
                 break
         pass
 
@@ -1227,12 +1174,12 @@ class HlsCenter:
         for idx in range(self.count):
             item = self.services[idx]
             if item.is_alive() and item.is_backend_timeout():
-                logging.info("hls-center, one service timeout and stop")
+                print("hls-center, one service timeout and stop")
                 item.stop()
             if item.is_alive():
                 items.append(item)
             else:
-                logging.info("hls-center, one service not alive and restart")
+                print("hls-center, one service not alive and restart")
                 items.append(createHls(idx))
                 time.sleep(1)
         self.services = items
@@ -1302,7 +1249,7 @@ class MyHTTPRequestHandler:
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         path = self.translate_path(uri)
-        logging.info("webhandler, begin: %s", path)
+        print("webhandler, begin:", path)
 
         ## check workdir default
         fpath = os.path.join(self.workdir, path)
@@ -1336,13 +1283,13 @@ class MyHTTPRequestHandler:
             source = path[:pos2]
             if pos1 == 0 and pos1 + len(prefix) <= pos2:
                 source = path[pos1+len(prefix):pos2]
-            logging.info("webhandler, m3u8 source: %s", source)
+            print("webhandler, m3u8 source:", source)
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
             m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                logging.warning("webhandler, m3u8 source not exists: %s", source)
+                print("webhandler, m3u8 source not exists:", source)
                 return web.HTTPNotFound(reason="Source file not found")
 
             # parse
@@ -1356,7 +1303,7 @@ class MyHTTPRequestHandler:
                     return web.HTTPUnsupportedMediaType()
                 if minfo.isWebDirectSupport():
                     path2 = os.path.join("/", source)
-                    logging.info("webhandler, m3u8 to source: %s", path2)
+                    print("webhandler, m3u8 to source:", path2)
                     return web.HTTPTemporaryRedirect(location=path2)
 
                 if not hextm.is_end:
@@ -1364,19 +1311,19 @@ class MyHTTPRequestHandler:
                     message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                     bret = self.hlscenter.post_service(message)
                     if not bret:
-                        logging.warning("webhandler, m3u8 prepare failed: %s", source)
+                        print("webhandler, m3u8 prepare failed:", source)
                         return web.HTTPTooManyRequests()
                     await asyncio.sleep(3)
 
                 #-- redirect
                 path2 = os.path.join(prefix, path)
                 path2 = os.path.join("/", path2)
-                logging.info("webhandler, m3u8 to redirect: %s", path2)
+                print("webhandler, m3u8 to redirect:", path2)
                 return web.HTTPTemporaryRedirect(location=path2)
 
             # send direct
             if hextm.is_end:
-                logging.info("webhandler, m3u8 is complete: %s", m3u8_fpath)
+                print("webhandler, m3u8 is complete:", m3u8_fpath)
                 return self.send_static(m3u8_fpath, headers)
 
             # TODO: prepare
@@ -1386,13 +1333,13 @@ class MyHTTPRequestHandler:
             #-- check m3u8
             if not os.path.exists(m3u8_fpath):
                 if not bret:
-                    logging.warning("webhandler, m3u8 failed: %s", m3u8_fpath)
+                    print("webhandler, m3u8 failed:", m3u8_fpath)
                     return web.HTTPTooManyRequests()
             else:
                 await asyncio.sleep(1)
-            logging.info("webhandler, m3u8 check-begin: %s", m3u8_fpath)
+            print("webhandler, m3u8 check-begin:", m3u8_fpath)
             await wait_extm_update(dst_fpath, 5, 15)
-            logging.info("webhandler, m3u8 check-end: %s", m3u8_fpath)
+            print("webhandler, m3u8 check-end:", m3u8_fpath)
             return self.send_static(m3u8_fpath, headers)
 
         ##-----
@@ -1405,7 +1352,7 @@ class MyHTTPRequestHandler:
                 return web.HTTPBadRequest()
             segment = path[pos1+len(prefix):]
             source = path[pos1+len(prefix):pos2]
-            logging.info("webhandler, segment source: %s", source)
+            print("webhandler, segment source:", source)
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
@@ -1423,20 +1370,20 @@ class MyHTTPRequestHandler:
                 bret = self.hlscenter.post_service(message)
             if not os.path.exists(seg_fpath):
                 if not bret:
-                    logging.warning("webhandler, segment failed: %s", segment)
+                    print("webhandler, segment failed:", segment)
                     return web.HTTPTooManyRequests()
                 await wait_file_exist(seg_fpath, 15)
-            #logging.info("check_hls ts file:%s", seg_fpath)
+            #print("check_hls ts file:", seg_fpath)
             return self.send_static(seg_fpath, headers)
         return web.HTTPBadRequest()
 
     async def do_File(self, request):
         try:
-            #logging.info(["do_File begin", request.url])
+            #print("do_File begin", request.url)
             headers = request.headers
             uri = request.match_info["uri"]
         except Exception as e:
-            logging.warning(["do_File error:", e])
+            print("do_File error:", e)
             return web.HTTPBadRequest()
         else:
             resp = await self.check_hls(uri, headers)
@@ -1593,7 +1540,7 @@ async def run_web_server(handler):
         ])
     runner = web.AppRunner(app)
     await runner.setup()
-    logging.info("start server...")
+    print("start server...")
     site = web.TCPSite(runner, 'localhost', 8001)
     await site.start()
 
@@ -1605,21 +1552,19 @@ async def run_other_task():
 def do_test_coder():
     coder = Transcoder()
     #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 50, 5)
+    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 80, 5)
 
 def do_test():
+    set_log_path(None)
     #ftest = MediaExtm3u8()
     #ftest.open("index.m3u8", 5)
     #print(ftest.last_seq, ftest.duration, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
-    #print(gst_make_h264_enc_profile(1024))
     thread.start_new_thread(do_test_coder, ())
     time.sleep(30)
     pass
 
 def do_main(srcPath, dstPath, maxCount):
-    logging.info("=================\n\n")
-    logging.info("start...")
-
+    print("start...")
     try:
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
         handler.init()
@@ -1630,7 +1575,7 @@ def do_main(srcPath, dstPath, maxCount):
         loop.run_forever()
     except:
         print()
-        logging.warning("quit for exception")
+        print("quit for exception")
     finally:
         handler.uninit()
     print()
@@ -1638,9 +1583,6 @@ def do_main(srcPath, dstPath, maxCount):
 
 # should use __main__ to support child-process
 if __name__ == "__main__":
-    logc = "/tmp/hls_client.txt"
-    logc = None
-    set_log_path(logc)
     do_test()
     #do_main("/disk0/deepnas/home", "/disk0/deepnas/cache", 1)
     #do_main(None, None, 1)
