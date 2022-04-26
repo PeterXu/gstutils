@@ -1033,7 +1033,7 @@ class HlsService:
                     msg = self.conn.recv()
                     self.on_hls_message(msg)
             except Exception as e:
-                logging.warning("hls-srv, poll err and quit: %s", e)
+                logging.warning(["hls-srv, poll err and quit:", e])
                 break
             except:
                 logging.warning("hls-srv, poll other err and quit")
@@ -1048,7 +1048,7 @@ class HlsService:
             except:
                 pass
         self.stop_coder()
-        time.sleep(1)
+        time.sleep(0.5)
         pass
     pass
 
@@ -1140,7 +1140,7 @@ class HlsClient:
                     msg = self.conn.recv()
                     self.on_backend_message(msg)
             except Exception as e:
-                print("hls-cli, poll err: %s", e)
+                print("hls-cli, poll err:", e)
                 break
         pass
 
@@ -1167,6 +1167,7 @@ class HlsCenter:
         for item in self.services:
             item.stop()
         self.services = []
+        time.sleep(1)
     def check_services(self):
         items = []
         for idx in range(self.count):
@@ -1532,14 +1533,17 @@ class MyHTTPRequestHandler:
 
 
 async def run_web_server(handler):
-    print("main, start server: localhost:8001")
+    addr = "0.0.0.0"
+    #addr = "localhost"
+    port = "8001"
+    print("main, start server:", addr, port)
     app = web.Application(middlewares=[])
     app.add_routes([
         web.get(r'/{uri:.*}', handler.do_File),
         ])
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, 'localhost', 8001)
+    site = web.TCPSite(runner, addr, port)
     await site.start()
 
 async def run_other_task():
