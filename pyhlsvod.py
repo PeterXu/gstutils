@@ -860,7 +860,7 @@ class HlsMessage:
         self.name = name
         self.fsrc = fsrc
         self.fdst = fdst
-        self.duration = 5
+        self.duration = 10
         self.result = None
     def str(self):
         return "%s:%s:%s:%s" % (self.mtype, self.name, self.fsrc, self.fdst)
@@ -1248,7 +1248,7 @@ class MyHTTPRequestHandler:
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         path = self.translate_path(uri)
-        print("webhandler, begin:", path)
+        logging.info(["webhandler, begin:", path])
 
         ## check workdir default
         fpath = os.path.join(self.workdir, path)
@@ -1282,13 +1282,13 @@ class MyHTTPRequestHandler:
             source = path[:pos2]
             if pos1 == 0 and pos1 + len(prefix) <= pos2:
                 source = path[pos1+len(prefix):pos2]
-            print("webhandler, m3u8 source:", source)
+            logging.info(["webhandler, m3u8 source:", source])
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
             m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                print("webhandler, m3u8 source not exists:", source)
+                logging.info(["webhandler, m3u8 source not exists:", source])
                 return web.HTTPNotFound(reason="Source file not found")
 
             # parse
@@ -1302,43 +1302,53 @@ class MyHTTPRequestHandler:
                     return web.HTTPUnsupportedMediaType()
                 if minfo.isWebDirectSupport():
                     path2 = os.path.join("/", source)
-                    print("webhandler, m3u8 to source:", path2)
+                    logging.info(["webhandler, m3u8 to source:", path2])
                     return web.HTTPTemporaryRedirect(location=path2)
 
                 if not hextm.is_end:
                     #TODO: prepare
+                    logging.info(["webhandler, m3u8 prepare1:", source])
                     message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                     bret = self.hlscenter.post_service(message)
                     if not bret:
-                        print("webhandler, m3u8 prepare failed:", source)
+                        logging.info(["webhandler, m3u8 prepare failed:", source])
                         return web.HTTPTooManyRequests()
-                    await asyncio.sleep(3)
+                    delay = 2
+                    if not hextm.is_begin or hextm.last_seq < 3:
+                        delay = 5
+                    await asyncio.sleep(delay)
 
                 #-- redirect
                 path2 = os.path.join(prefix, path)
                 path2 = os.path.join("/", path2)
-                print("webhandler, m3u8 to redirect:", path2)
+                logging.info(["webhandler, m3u8 to redirect:", path2])
                 return web.HTTPTemporaryRedirect(location=path2)
 
             # send direct
             if hextm.is_end:
-                print("webhandler, m3u8 is complete:", m3u8_fpath)
+                logging.info(["webhandler, m3u8 is complete:", m3u8_fpath])
                 return self.send_static(m3u8_fpath, headers)
 
             # TODO: prepare
+            logging.info(["webhandler, m3u8 prepare2:", source, hextm.last_seq])
             message = HlsMessage("prepare", source, src_fpath, dst_fpath)
             bret = self.hlscenter.post_service(message)
+
+            # delay
+            delay = 1
+            if not hextm.is_begin or hextm.last_seq < 5:
+                delay = 1.5
+            if not os.path.exists(m3u8_fpath):
+                delay = 2.5
+            await asyncio.sleep(delay)
+            #hextm.parse(dst_fpath)
+            #logging.info(["webhandler, m3u8 check-media:", source, hextm.last_seq, bret])
 
             #-- check m3u8
             if not os.path.exists(m3u8_fpath):
                 if not bret:
-                    print("webhandler, m3u8 failed:", m3u8_fpath)
+                    logging.info(["webhandler, m3u8 failed:", m3u8_fpath])
                     return web.HTTPTooManyRequests()
-            else:
-                await asyncio.sleep(1)
-            print("webhandler, m3u8 check-begin:", m3u8_fpath)
-            await wait_extm_update(dst_fpath, 5, 15)
-            print("webhandler, m3u8 check-end:", m3u8_fpath)
             return self.send_static(m3u8_fpath, headers)
 
         ##-----
@@ -1351,7 +1361,7 @@ class MyHTTPRequestHandler:
                 return web.HTTPBadRequest()
             segment = path[pos1+len(prefix):]
             source = path[pos1+len(prefix):pos2]
-            print("webhandler, segment source:", source)
+            logging.info(["webhandler, segment source:", source])
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
@@ -1360,19 +1370,13 @@ class MyHTTPRequestHandler:
                 return web.HTTPNotFound(reason="Source file not found")
 
             hextm = MediaExtm3u8()
-            if os.path.exists(seg_fpath):
-                hextm.parse(dst_fpath)
-            bret = True
+            hextm.parse(dst_fpath)
             if not hextm.is_end:
-                #TODO:
                 message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                 bret = self.hlscenter.post_service(message)
-            if not os.path.exists(seg_fpath):
-                if not bret:
-                    print("webhandler, segment failed:", segment)
+                if not bret and not os.path.exists(seg_fpath):
+                    logging.info(["webhandler, m3u8 failed:", m3u8_fpath])
                     return web.HTTPTooManyRequests()
-                await wait_file_exist(seg_fpath, 15)
-            #print("check_hls ts file:", seg_fpath)
             return self.send_static(seg_fpath, headers)
         return web.HTTPBadRequest()
 
@@ -1382,7 +1386,7 @@ class MyHTTPRequestHandler:
             headers = request.headers
             uri = request.match_info["uri"]
         except Exception as e:
-            print("do_File error:", e)
+            logging.info(["do_File error:", e])
             return web.HTTPBadRequest()
         else:
             resp = await self.check_hls(uri, headers)
@@ -1536,7 +1540,7 @@ async def run_web_server(handler):
     addr = "0.0.0.0"
     #addr = "localhost"
     port = "8001"
-    print("main, start server:", addr, port)
+    logging.info(["main, start server:", addr, port])
     app = web.Application(middlewares=[])
     app.add_routes([
         web.get(r'/{uri:.*}', handler.do_File),
@@ -1554,7 +1558,7 @@ async def run_other_task():
 def do_test_coder():
     coder = Transcoder()
     #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 80, 5)
+    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
 
 def do_test():
     set_log_path(None)
@@ -1566,10 +1570,12 @@ def do_test():
     pass
 
 def do_main(srcPath, dstPath, maxCount):
-    print("main, start...")
     try:
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
         handler.init()
+
+        set_log_path("/tmp/hls_client.txt")
+        logging.info("main, start...")
 
         loop = asyncio.get_event_loop()
         loop.create_task(run_web_server(handler))
@@ -1577,7 +1583,7 @@ def do_main(srcPath, dstPath, maxCount):
         loop.run_forever()
     except:
         print()
-        print("main, quit for exception")
+        logging.info("main, quit for exception")
     finally:
         handler.uninit()
     print()
@@ -1587,5 +1593,5 @@ def do_main(srcPath, dstPath, maxCount):
 if __name__ == "__main__":
     #do_test()
     #do_main("/disk0/deepnas/home", "/disk0/deepnas/cache", 1)
-    do_main(None, None, 1)
+    do_main(None, "/home/linaro/wspace/hlscache", 1)
     sys.exit(0)
