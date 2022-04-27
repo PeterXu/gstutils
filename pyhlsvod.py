@@ -527,6 +527,7 @@ class MediaExtm3u8(object):
         fp.write("#EXT-X-ALLOW-CACHE:NO\n")
         fp.write("#EXT-X-MEDIA-SEQUENCE:0\n")
         fp.write("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
+        fp.write("#EXT-X-PLAYLIST-TYPE:VOD\n")
         fp.write("\n")
         return True
     def _add_one(self, fp, segment, seconds):
@@ -692,8 +693,8 @@ class Transcoder(object):
         mux = gst_make_mux_profile()
         aac = gst_make_aac_enc_profile(akbps)
         avc = gst_make_h264_enc_profile(vkbps)
-        logging.info(["gst-coder, elems=", mux, aac, avc])
-        profile = "%s:%s:%s" % (mux, aac, avc)
+        logging.info(["gst-coder, elems=", mux, avc, aac])
+        profile = "%s:%s:%s" % (mux, avc, aac)
 
         minfo = MediaInfo()
         if not minfo.parse(infile):
@@ -715,10 +716,11 @@ class Transcoder(object):
         if vType: parts1.append("pb. ! %s ! queue ! psink0." % vType)
         if aType: parts1.append("pb. ! %s ! queue ! psink1." % aType)
         sstr1 = " ".join(parts1)
+        logging.info(["gst-coder, pipeline1:", sstr1])
         p1 = Gst.parse_launch(sstr1)
         psink0 = p1.get_by_name("psink0")
         psink1 = p1.get_by_name("psink1")
-        logging.info(["gst-coder, pipeline1:", sstr1, p1, psink0, psink1])
+        logging.info(["gst-coder, pipeline1 ret:", p1])
 
         #pipelin2
         parts2 = []
@@ -735,8 +737,11 @@ class Transcoder(object):
         parts2.append("db.audio_0 ! queue ! eb.audio_0")
         parts2.append("eb. ! fs.")
         sstr2 = " ".join(parts2)
+        logging.info(["gst-coder, pipeline2:", sstr2])
         p2 = Gst.parse_launch(sstr2)
         eb = p2.get_by_name("eb")
+        logging.info(["gst-coder, pipeline2 ret:", p2, eb])
+
         if eb:
             for i in range(eb.get_children_count()):
                 e = eb.get_child_by_index(i)
@@ -750,7 +755,6 @@ class Transcoder(object):
                     logging.info(["gst-coder, skip set-props:", e.get_name()])
         psrc0 = p2.get_by_name("psrc0")
         psrc1 = p2.get_by_name("psrc1")
-        logging.info(["gst-coder, pipeline2:", sstr2, p2, psrc0, psrc1])
 
         # connect p1 and p2
         #GObject.set(psrc, "proxysink", psink, NULL);
@@ -766,6 +770,7 @@ class Transcoder(object):
         p2.set_base_time(0)
 
         # set p1 as default pipeline
+        logging.info("gst-coder, set playing...")
         self.pipeline = p1
         self.pipeline2 = p2
         p1.set_state(Gst.State.PLAYING)
@@ -1562,6 +1567,7 @@ def do_test_coder():
 
 def do_test():
     set_log_path(None)
+    loggint.info("=======testing begin========")
     #ftest = MediaExtm3u8()
     #ftest.open("index.m3u8", 5)
     #print(ftest.last_seq, ftest.duration, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
