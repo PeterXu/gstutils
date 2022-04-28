@@ -244,6 +244,15 @@ def gst_video_dec(prop):
             if not gst_find_items(prop, ["format=WMV3"]):
                 return ["vc1parse", "avdec_vc1"]
     return [None, None]
+def gst_common_queue(sinkdelay=0, srcdelay=0):
+    elem = "queue"
+    if (sinkdelay > 0 or srcdelay > 0) and gst_make_elem("queuex"):
+        elem = "queuex"
+        if sinkdelay > 0:
+            elem = "%s min-sink-interval=%d" % (elem, sinkdelay)
+        if srcdelay > 0:
+            elem = "%s min-src-interval=%d" % (elem, srcdelay)
+    return elem
 
 def gst_parse_props(line, key):
     if line.find(key) == -1: return {}
@@ -710,8 +719,8 @@ class Transcoder(object):
         parts1 = []
         parts1.append("filesrc location=\"%s\" name=fs" % infile)
         parts1.append("parsebin name=pb")
-        parts1.append("proxysink name=psink0")
-        parts1.append("proxysink name=psink1")
+        if vType: parts1.append("proxysink name=psink0")
+        if aType: parts1.append("proxysink name=psink1")
         parts1.append("fs. ! pb.")
         if vType: parts1.append("pb. ! %s ! queue ! psink0." % vType)
         if aType: parts1.append("pb. ! %s ! queue ! psink1." % aType)
@@ -724,18 +733,30 @@ class Transcoder(object):
 
         #pipelin2
         parts2 = []
-        parts2.append("proxysrc name=psrc0")
-        parts2.append("proxysrc name=psrc1")
-        parts2.append("decodebin3 name=db")
+        if vType: parts2.append("proxysrc name=psrc0")
+        if aType: parts2.append("proxysrc name=psrc1")
+        if vType and aType:
+            parts2.append("decodebin3 name=db")
+        else:
+            parts2.append("decodebin name=db")
         parts2.append("encodebin profile=\"%s\" name=eb" % profile)
         #parts2.append("filesink location=/tmp/test3.ts name=fs")
         parts2.append("%s name=fs" % sink)
 
-        parts2.append("psrc0. ! db.sink_0")
-        parts2.append("psrc1. ! db.sink_1")
-        parts2.append("db.video_0 ! queue ! eb.video_0")
-        parts2.append("db.audio_0 ! queue ! eb.audio_0")
-        parts2.append("eb. ! fs.")
+        if vType and aType:
+            parts2.append("psrc0. ! db.sink_0")
+            parts2.append("psrc1. ! db.sink_1")
+            parts2.append("db.video_0 ! queue ! eb.video_0")
+            parts2.append("db.audio_0 ! queue ! eb.audio_0")
+        elif vType:
+            parts2.append("psrc0. ! db.")
+            parts2.append("db. ! video/x-raw ! queue ! eb.video_0")
+        else:
+            parts2.append("psrc1. ! db.")
+            parts2.append("db. ! audio/x-raw ! queue ! eb.audio_0")
+
+        queue = gst_common_queue(5000, 0)
+        parts2.append("eb. ! %s ! fs." % queue)
         sstr2 = " ".join(parts2)
         logging.info(["gst-coder, pipeline2:", sstr2])
         p2 = Gst.parse_launch(sstr2)
@@ -758,8 +779,8 @@ class Transcoder(object):
 
         # connect p1 and p2
         #GObject.set(psrc, "proxysink", psink, NULL);
-        psrc0.set_property('proxysink', psink0)
-        psrc1.set_property('proxysink', psink1)
+        if psrc0 and psink0: psrc0.set_property('proxysink', psink0)
+        if psrc1 and psink1: psrc1.set_property('proxysink', psink1)
     
         # set clock and time
         clock = Gst.SystemClock.obtain()
@@ -915,7 +936,7 @@ class HlsService:
 
     def is_coder_timeout(self):
         if self.last_coder_time != 0:
-            return nowtime() >= self.last_coder_time + 30*1000
+            return nowtime() >= self.last_coder_time + 20*1000
         return False
 
     def stop_coder(self):
@@ -947,7 +968,7 @@ class HlsService:
         if not os.path.exists(fdst_tmp):
             os.makedirs(fdst_tmp, exist_ok=True)
         mmon = MediaMonitor()
-        mmon.start(fdst_tmp, self.mon_changed)
+        mmon.start(fdst_tmp, self.on_mon_changed)
         self.monitor = mmon
 
         self.last_coder_time = nowtime()
@@ -957,7 +978,7 @@ class HlsService:
         thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, duration))
         logging.info("hls-srv, coder end...")
 
-    def mon_changed(self, path, lines):
+    def on_mon_changed(self, path, lines):
         extm = self.extm3u8
         if not extm:
             logging.error("hls-srv, changed but invalid extm3u8")
@@ -986,8 +1007,8 @@ class HlsService:
                 isSeg = False
                 srcf = os.path.join(path, line.strip())
                 name, dstf = extm.next_name()
-                logging.info("hls-srv, chhanged new-segment: <%s> from %s", name, srcf)
-                copyfile(srcf, dstf)
+                logging.info("hls-srv, changed new-segment: <%s> from %s", name, srcf)
+                movefile(srcf, dstf)
                 extm.write(name, seconds)
             else:
                 logging.warning("hls-srv, changed invalid new-segment: %s", line)
@@ -1033,7 +1054,7 @@ class HlsService:
     def run_forever(self):
         while True:
             try:
-                ret = self.conn.poll(0.5)
+                ret = self.conn.poll(1)
                 if ret:
                     msg = self.conn.recv()
                     self.on_hls_message(msg)
@@ -1253,7 +1274,7 @@ class MyHTTPRequestHandler:
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         path = self.translate_path(uri)
-        logging.info(["webhandler, begin:", path])
+        #logging.info(["webhandler, begin:", path])
 
         ## check workdir default
         fpath = os.path.join(self.workdir, path)
@@ -1273,6 +1294,7 @@ class MyHTTPRequestHandler:
         ## check hls extensions
         parts = os.path.splitext(fpath)
         if not self.support_exts.get(parts[1]):
+            logging.warning(["webhandler, unsupport ext: ", fpath])
             return web.HTTPNotFound(reason="File not found")
 
         ##-----
@@ -1287,13 +1309,13 @@ class MyHTTPRequestHandler:
             source = path[:pos2]
             if pos1 == 0 and pos1 + len(prefix) <= pos2:
                 source = path[pos1+len(prefix):pos2]
-            logging.info(["webhandler, m3u8 source:", source])
+            #logging.info(["webhandler, m3u8 source:", source])
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
             m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                logging.info(["webhandler, m3u8 source not exists:", source])
+                logging.warning(["webhandler, m3u8 source not exists:", source])
                 return web.HTTPNotFound(reason="Source file not found")
 
             # parse
@@ -1304,10 +1326,11 @@ class MyHTTPRequestHandler:
                 #-- check source info
                 minfo = MediaInfo()
                 if not minfo.parse(src_fpath):
+                    logging.warning(["webhandler, m3u8, unsupport media:", src_fpath])
                     return web.HTTPUnsupportedMediaType()
                 if minfo.isWebDirectSupport():
                     path2 = os.path.join("/", source)
-                    logging.info(["webhandler, m3u8 to source:", path2])
+                    logging.info(["webhandler, redirect to source(not to transcode):", path2])
                     return web.HTTPTemporaryRedirect(location=path2)
 
                 if not hextm.is_end:
@@ -1316,7 +1339,7 @@ class MyHTTPRequestHandler:
                     message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                     bret = self.hlscenter.post_service(message)
                     if not bret:
-                        logging.info(["webhandler, m3u8 prepare failed:", source])
+                        logging.warning(["webhandler, m3u8 prepare1 failed:", source])
                         return web.HTTPTooManyRequests()
                     delay = 2
                     if not hextm.is_begin or hextm.last_seq < 3:
@@ -1331,7 +1354,7 @@ class MyHTTPRequestHandler:
 
             # send direct
             if hextm.is_end:
-                logging.info(["webhandler, m3u8 is complete:", m3u8_fpath])
+                logging.info(["webhandler, m3u8 is complete(transcode end):", m3u8_fpath])
                 return self.send_static(m3u8_fpath, headers)
 
             # TODO: prepare
@@ -1341,10 +1364,10 @@ class MyHTTPRequestHandler:
 
             # delay
             delay = 1
-            if not hextm.is_begin or hextm.last_seq < 5:
-                delay = 1.5
+            if not hextm.is_begin or hextm.last_seq < 6:
+                delay = 2
             if not os.path.exists(m3u8_fpath):
-                delay = 2.5
+                delay = 3
             await asyncio.sleep(delay)
             #hextm.parse(dst_fpath)
             #logging.info(["webhandler, m3u8 check-media:", source, hextm.last_seq, bret])
@@ -1352,7 +1375,7 @@ class MyHTTPRequestHandler:
             #-- check m3u8
             if not os.path.exists(m3u8_fpath):
                 if not bret:
-                    logging.info(["webhandler, m3u8 failed:", m3u8_fpath])
+                    logging.warning(["webhandler, m3u8 prepare2 failed:", m3u8_fpath])
                     return web.HTTPTooManyRequests()
             return self.send_static(m3u8_fpath, headers)
 
@@ -1372,6 +1395,7 @@ class MyHTTPRequestHandler:
             dst_fpath = os.path.join(self.hlsdir, source)
             seg_fpath = os.path.join(self.hlsdir, segment)
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
+                logging.warning(["webhandler, segment source not exist:", src_fpath])
                 return web.HTTPNotFound(reason="Source file not found")
 
             hextm = MediaExtm3u8()
@@ -1380,7 +1404,7 @@ class MyHTTPRequestHandler:
                 message = HlsMessage("prepare", source, src_fpath, dst_fpath)
                 bret = self.hlscenter.post_service(message)
                 if not bret and not os.path.exists(seg_fpath):
-                    logging.info(["webhandler, m3u8 failed:", m3u8_fpath])
+                    logging.warning(["webhandler, segment prepare failed:", m3u8_fpath])
                     return web.HTTPTooManyRequests()
             return self.send_static(seg_fpath, headers)
         return web.HTTPBadRequest()
@@ -1561,16 +1585,19 @@ async def run_other_task():
 
 
 def do_test_coder():
-    coder = Transcoder()
-    #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
-
-def do_test():
-    set_log_path(None)
-    loggint.info("=======testing begin========")
     #ftest = MediaExtm3u8()
     #ftest.open("index.m3u8", 5)
     #print(ftest.last_seq, ftest.duration, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
+
+    coder = Transcoder()
+    #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
+    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
+    #coder.do_hlsvod("samples/test_video.ts", "/tmp/output", 0, 5)
+    #coder.do_hlsvod("samples/test_audio.ts", "/tmp/output", 0, 5)
+
+def do_test():
+    set_log_path(None)
+    logging.info("=======testing begin========")
     thread.start_new_thread(do_test_coder, ())
     time.sleep(30)
     pass
