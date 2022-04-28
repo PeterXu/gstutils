@@ -520,7 +520,7 @@ class MediaExtm3u8(object):
             logging.warning("extm3u, different duration")
             #return False
         if not self.is_end:
-            if self.last_seq < 5:
+            if self.last_seq < 3:
                 logging.warning("extm3u, too few segments: %d and restart", self.last_seq)
                 return False
             if self.probe_pos > 0:
@@ -537,6 +537,7 @@ class MediaExtm3u8(object):
         fp.write("#EXT-X-MEDIA-SEQUENCE:0\n")
         fp.write("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
         fp.write("#EXT-X-PLAYLIST-TYPE:VOD\n")
+        fp.write("#EXT-X-START:TIME-OFFSET=0\n")
         fp.write("\n")
         return True
     def _add_one(self, fp, segment, seconds):
@@ -733,29 +734,27 @@ class Transcoder(object):
 
         #pipelin2
         parts2 = []
-        if vType: parts2.append("proxysrc name=psrc0")
-        if aType: parts2.append("proxysrc name=psrc1")
-        if vType and aType:
-            parts2.append("decodebin3 name=db")
-        else:
-            parts2.append("decodebin name=db")
+        if vType:
+            parts2.append("proxysrc name=psrc0")
+            parts2.append("decodebin name=db0")
+        if aType:
+            parts2.append("proxysrc name=psrc1")
+            parts2.append("decodebin name=db1")
         parts2.append("encodebin profile=\"%s\" name=eb" % profile)
         #parts2.append("filesink location=/tmp/test3.ts name=fs")
         parts2.append("%s name=fs" % sink)
 
-        if vType and aType:
-            parts2.append("psrc0. ! db.sink_0")
-            parts2.append("psrc1. ! db.sink_1")
-            parts2.append("db.video_0 ! queue ! eb.video_0")
-            parts2.append("db.audio_0 ! queue ! eb.audio_0")
-        elif vType:
-            parts2.append("psrc0. ! db.")
-            parts2.append("db. ! video/x-raw ! queue ! eb.video_0")
-        else:
-            parts2.append("psrc1. ! db.")
-            parts2.append("db. ! audio/x-raw ! queue ! eb.audio_0")
+        if vType:
+            parts2.append("psrc0. ! db0.")
+            parts2.append("db0. ! video/x-raw ! queue ! eb.video_0")
+        if aType:
+            parts2.append("psrc1. ! db1.")
+            parts2.append("db1. ! audio/x-raw ! queue ! eb.audio_0")
 
-        queue = gst_common_queue(5000, 0)
+        interval = 5000
+        if aType and not vType: interval = 1000
+        queue = gst_common_queue(interval, 0)
+
         parts2.append("eb. ! %s ! fs." % queue)
         sstr2 = " ".join(parts2)
         logging.info(["gst-coder, pipeline2:", sstr2])
@@ -820,6 +819,7 @@ class Transcoder(object):
     def do_seek(self, pline, steps):
         if not pline: pline = self.pipeline
         if not pline: return
+        steps = steps - 2
         if steps <= 0: return
         logging.info(["gst-coder, seek:", pline, steps])
         pline.set_state(Gst.State.PAUSED)
@@ -965,8 +965,9 @@ class HlsService:
 
         # tmp destination for transcoder
         fdst_tmp = os.path.join(fdst, "cached");
-        if not os.path.exists(fdst_tmp):
-            os.makedirs(fdst_tmp, exist_ok=True)
+        if os.path.exists(fdst_tmp):
+            shutil.rmtree(fdst_tmp)
+        os.makedirs(fdst_tmp, exist_ok=True)
         mmon = MediaMonitor()
         mmon.start(fdst_tmp, self.on_mon_changed)
         self.monitor = mmon
@@ -1364,7 +1365,7 @@ class MyHTTPRequestHandler:
 
             # delay
             delay = 1
-            if not hextm.is_begin or hextm.last_seq < 6:
+            if not hextm.is_begin or hextm.last_seq < 5:
                 delay = 2
             if not os.path.exists(m3u8_fpath):
                 delay = 3
