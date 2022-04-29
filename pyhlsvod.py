@@ -50,7 +50,7 @@ def set_log_path(path):
             datefmt='%m/%d/%Y %H:%M:%S',
             level=logging.INFO)
     else:
-        logf = "/tmp/hlsout.txt"
+        logf = "/tmp/hls_out.txt"
         if path: logf = os.fspath(path)
         logging.basicConfig(filename=logf,
             format='%(asctime)s [%(levelname)s] %(message)s',
@@ -819,7 +819,7 @@ class Transcoder(object):
     def do_seek(self, pline, steps):
         if not pline: pline = self.pipeline
         if not pline: return
-        steps = steps - 2
+        steps = steps - 3
         if steps <= 0: return
         logging.info(["gst-coder, seek:", pline, steps])
         pline.set_state(Gst.State.PAUSED)
@@ -1015,6 +1015,7 @@ class HlsService:
                 logging.warning("hls-srv, changed invalid new-segment: %s", line)
                 pass
             pass
+        os.sync()
         pass
 
     def prepare_coder(self, source, fsrc, fdst, duration):
@@ -1275,7 +1276,7 @@ class MyHTTPRequestHandler:
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         path = self.translate_path(uri)
-        #logging.info(["webhandler, begin:", path])
+        #logging.info(["webhandler, begin:", path, headers])
 
         ## check workdir default
         fpath = os.path.join(self.workdir, path)
