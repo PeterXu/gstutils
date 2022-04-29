@@ -12,6 +12,7 @@ import time
 import random
 import string
 import shutil
+import datetime
 import mimetypes
 import posixpath
 import logging
@@ -39,7 +40,6 @@ try:
     from gi.repository import GstPbutils
 except:
     pass
-
 
 def set_log_path(path):
     if pyver() >= 39:
@@ -271,7 +271,8 @@ def gst_parse_props(line, key):
     return props
 def gst_discover_info(fname):
     info = {}
-    shbin = "gst-discoverer-1.0 -v %s" % fname
+    uri = urllib.parse.urljoin("file://", fname)
+    shbin = "gst-discoverer-1.0 -v %s" % uri
     lines = os.popen(shbin)
     for line in lines:
         if line.find("Duration: ") >= 0:
@@ -751,7 +752,7 @@ class Transcoder(object):
             parts2.append("psrc1. ! db1.")
             parts2.append("db1. ! audio/x-raw ! queue ! eb.audio_0")
 
-        interval = 5000
+        interval = 3000
         if aType and not vType: interval = 1000
         queue = gst_common_queue(interval, 0)
 
@@ -936,7 +937,7 @@ class HlsService:
 
     def is_coder_timeout(self):
         if self.last_coder_time != 0:
-            return nowtime() >= self.last_coder_time + 20*1000
+            return nowtime() >= self.last_coder_time + 21*1000
         return False
 
     def stop_coder(self):
@@ -1131,15 +1132,15 @@ class HlsClient:
     def on_backend_message(self, msg):
         self.last_backend_time = nowtime()
         if not msg:
-            print("hls-cli, invalid msg:", msg)
+            logging.info(["hls-cli, invalid msg:", msg])
             return
-        #print("hls-cli, recv msg:", msg)
+        #logging.info(["hls-cli, recv msg:", msg])
         if msg.mtype == "status" or msg.result is True:
-            #print("hls-cli, recv update:", msg.name)
+            #logging.info(["hls-cli, recv update:", msg.name])
             self.source = msg.name
             self.tmp_source = None
         if msg.result is False:
-            #print("hls-cli, recv error:", msg.name)
+            #logging.info(["hls-cli, recv error:", msg.name])
             if msg.name == self.tmp_source:
                 self.tmp_source = None
         pass
@@ -1155,10 +1156,10 @@ class HlsClient:
         self.child.kill()
 
     def _service(self):
-        print("hls-cli, run backend begin")
+        logging.info("hls-cli, run backend begin")
         self.child.join()
         self.set_alive(False)
-        print("hls-cli, run backend end")
+        logging.info("hls-cli, run backend end")
 
     def _listen(self):
         while self.alive:
@@ -1168,7 +1169,7 @@ class HlsClient:
                     msg = self.conn.recv()
                     self.on_backend_message(msg)
             except Exception as e:
-                print("hls-cli, poll err:", e)
+                logging.info(["hls-cli, poll err:", e])
                 break
         pass
 
@@ -1201,12 +1202,12 @@ class HlsCenter:
         for idx in range(self.count):
             item = self.services[idx]
             if item.is_alive() and item.is_backend_timeout():
-                print("hls-center, one service timeout and stop")
+                logging.info("hls-center, one service timeout and stop")
                 item.stop()
             if item.is_alive():
                 items.append(item)
             else:
-                print("hls-center, one service not alive and restart")
+                logging.info("hls-center, one service not alive and restart")
                 items.append(createHls(idx))
                 time.sleep(1)
         self.services = items
@@ -1276,7 +1277,10 @@ class MyHTTPRequestHandler:
     # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
     async def check_hls(self, uri, headers):
         path = self.translate_path(uri)
-        #logging.info(["webhandler, begin:", path, headers])
+        #logging.info(["webhandler, begin:", path])
+        cpath = os.path.join(".", path)
+        if os.path.isfile(cpath):
+            return self.send_static(cpath, headers)
 
         ## check workdir default
         fpath = os.path.join(self.workdir, path)
@@ -1317,7 +1321,7 @@ class MyHTTPRequestHandler:
             dst_fpath = os.path.join(self.hlsdir, source)
             m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
             if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                logging.warning(["webhandler, m3u8 source not exists:", source])
+                logging.warning(["webhandler, m3u8 source not exists:", src_fpath])
                 return web.HTTPNotFound(reason="Source file not found")
 
             # parse
@@ -1391,7 +1395,7 @@ class MyHTTPRequestHandler:
                 return web.HTTPBadRequest()
             segment = path[pos1+len(prefix):]
             source = path[pos1+len(prefix):pos2]
-            logging.info(["webhandler, segment source:", source])
+            logging.info(["webhandler, segment file:", segment])
 
             src_fpath = os.path.join(self.workdir, source)
             dst_fpath = os.path.join(self.hlsdir, source)
@@ -1413,7 +1417,7 @@ class MyHTTPRequestHandler:
 
     async def do_File(self, request):
         try:
-            #print("do_File begin", request.url)
+            #logging.info(["do_File begin", request.url])
             headers = request.headers
             uri = request.match_info["uri"]
         except Exception as e:
@@ -1606,11 +1610,11 @@ def do_test():
 
 def do_main(srcPath, dstPath, maxCount):
     try:
+        set_log_path("/tmp/hls_client.txt")
+        logging.info(["main, start...", srcPath, dstPath, maxCount])
+
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
         handler.init()
-
-        set_log_path("/tmp/hls_client.txt")
-        logging.info("main, start...")
 
         loop = asyncio.get_event_loop()
         loop.create_task(run_web_server(handler))
@@ -1627,6 +1631,6 @@ def do_main(srcPath, dstPath, maxCount):
 # should use __main__ to support child-process
 if __name__ == "__main__":
     #do_test()
-    #do_main("/disk0/deepnas/home", "/disk0/deepnas/cache", 1)
-    do_main(None, "/home/linaro/wspace/hlscache", 1)
+    do_main("/deepnas/home", "/opt/wspace/cache", 2)
+    #do_main(None, "/home/linaro/wspace/hlscache", 1)
     sys.exit(0)

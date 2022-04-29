@@ -9,6 +9,9 @@ The request uri:
     /hlsvod/U1000/avatar.mp4/index.m3u8
 
 The nginx conf:
+        location /deepnas/media/play {
+            rewrite ^/deepnas/media/play/(.*)$ /deepnas/media/hlsvod/$1 last;
+        }
         location ~ ^/(hlsvod|deepnas/media/hlsvod) {
             lua_code_cache off;
             set $upstream "";
@@ -41,7 +44,7 @@ if not path then
     ngx.exit(404)
     return
 end
-path = "/" .. path
+path = "/hlsvod/" .. path
 
 ngx.var.upstream = proxy_addr
 ngx.req.set_uri(path)
