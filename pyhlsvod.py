@@ -16,6 +16,7 @@ import datetime
 import mimetypes
 import posixpath
 import logging
+import multiprocessing
 from multiprocessing import Process, Pipe
 import threading
 
@@ -42,20 +43,13 @@ except:
     pass
 
 def set_log_path(path):
+    formatter = '%(asctime)s - [%(levelname)s] - %(message)s'
+    datefmt = '%m/%d/%Y %H:%M:%S'
     if pyver() >= 39:
-        logf = "/dev/stdout"
-        if path: logf = os.fspath(path)
-        logging.basicConfig(filename=logf, encoding='utf-8',
-            format='%(asctime)s [%(levelname)s] %(message)s',
-            datefmt='%m/%d/%Y %H:%M:%S',
-            level=logging.INFO)
+        logging.basicConfig(filename=path, encoding='utf-8', format=formatter, datefmt=datefmt, level=logging.INFO)
     else:
-        logf = "/tmp/hls_out.txt"
-        if path: logf = os.fspath(path)
-        logging.basicConfig(filename=logf,
-            format='%(asctime)s [%(levelname)s] %(message)s',
-            datefmt='%m/%d/%Y %H:%M:%S',
-            level=logging.INFO)
+        logging.basicConfig(filename=path, format=formatter, datefmt=datefmt, level=logging.INFO)
+    pass
 
 #======== common tools
 def pyver():
@@ -142,7 +136,7 @@ def gst_make_audio_props(name, kbps):
     return None
 def gst_make_video_props(name, kbps):
     bps = kbps * 1024
-    props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main",}
+    props1 = {"rc-mode":"vbr", "bps-max":bps, "profile":"main",}
     props2 = {"pass":"pass1", "bitrate":bps, "profile":"main"}
     props3 = {"pass":"pass1", "bitrate":kbps}
     props = {
@@ -271,8 +265,8 @@ def gst_parse_props(line, key):
     return props
 def gst_discover_info(fname):
     info = {}
-    uri = urllib.parse.urljoin("file://", fname)
-    shbin = "gst-discoverer-1.0 -v %s" % uri
+    uri = urllib.parse.urljoin("file://", os.path.abspath(fname))
+    shbin = "gst-discoverer-1.0 -v \"%s\"" % uri
     lines = os.popen(shbin)
     for line in lines:
         if line.find("Duration: ") >= 0:
@@ -623,19 +617,22 @@ class MediaInfo(object):
             video = self.mediaType("video")
             if audio != None and audio != "audio/mpeg": return False
             if video != None and video != "video/x-h264": return False 
-            if self.fileSize() <= 100*1024*1024:  #100MB
-                if self.bitrate() <= 5*1024*1024: #5Mbps
-                    return True
+            if self.fileSize() <= 11*1024*1024:
+                return True
         return False
 
     def parse(self, infile):
         info = gst_discover_info(infile)
-        if not info: return False
+        if not info:
+            logging.warning("minfo, no info")
+            return False
         self.infile = infile
         self.info = info
         if self.duration() == 0:
+            logging.warning("minfo, no duration")
             return False
         if not self.videoType() and not self.audioType():
+            logging.warning("minfo, no audio and video")
             return False
         try:
             fp = open(infile, "rb")
@@ -701,12 +698,6 @@ class Transcoder(object):
         self.working = -1
 
     def do_work(self, infile, akbps, vkbps, sink):
-        mux = gst_make_mux_profile()
-        aac = gst_make_aac_enc_profile(akbps)
-        avc = gst_make_h264_enc_profile(vkbps)
-        logging.info(["gst-coder, elems=", mux, avc, aac])
-        profile = "%s:%s:%s" % (mux, avc, aac)
-
         minfo = MediaInfo()
         if not minfo.parse(infile):
             logging.warning(["gst-coder, invalid media file:", infile])
@@ -715,7 +706,17 @@ class Transcoder(object):
         muxName = minfo.muxName()
         aType = minfo.audioType()
         vType = minfo.videoType()
-        logging.info(["gst-coder, media-type:", muxName, aType, vType])
+        kbps = int(minfo.bitrate() / 1024)
+        logging.info(["gst-coder, media-type:", muxName, aType, vType, kbps])
+        if kbps > 0:
+            if vType and kbps < vkbps: vkbps = kbps
+            if aType and kbps < akbps: akbps = kbps
+
+        mux = gst_make_mux_profile()
+        aac = gst_make_aac_enc_profile(akbps)
+        avc = gst_make_h264_enc_profile(vkbps)
+        logging.info(["gst-coder, elems=", mux, avc, aac])
+        profile = "%s:%s:%s" % (mux, avc, aac)
 
         #pipeline1
         parts1 = []
@@ -762,7 +763,6 @@ class Transcoder(object):
         p2 = Gst.parse_launch(sstr2)
         eb = p2.get_by_name("eb")
         logging.info(["gst-coder, pipeline2 ret:", p2, eb])
-
         if eb:
             for i in range(eb.get_children_count()):
                 e = eb.get_child_by_index(i)
@@ -1086,7 +1086,7 @@ def run_hls_service(conn, index):
     logf = "/tmp/hls_service_%d.txt" % index
     set_log_path(logf)
     logging.info("=====================\n\n")
-    logging.info("run_hls_service begin")
+    logging.info(["run_hls_service begin, pid", os.getpid(), os.getppid()])
     hls = HlsService(conn)
     hls.run_forever()
 
@@ -1174,8 +1174,10 @@ class HlsClient:
         pass
 
 def createHls(index):
-    p1, p2 = Pipe(True)
-    srv = Process(target=run_hls_service, args=(p1, index))
+    logging.info(["hls-cli, create hls-backend, self", os.getpid()])
+    ctx = multiprocessing.get_context('spawn')
+    p1, p2 = ctx.Pipe(True)
+    srv = ctx.Process(target=run_hls_service, args=(p1, index))
     srv.start()
     cli = HlsClient(p2, srv)
     cli.start()
@@ -1270,150 +1272,116 @@ class MyHTTPRequestHandler:
         self.hlscenter.stop_services()
         pass
 
-    # hls-play step: origin is "http://../source.mkv", source.mkv(file) is in self.directory
-    # step0: access "http://../source.mkv/index.m3u8", this is tempory url.
-    # step1: redirect to "http://../hlsvod/source.mkv/index.m3u8",
-    # step2: access "http://../hlsvod/source.mkv/index.m3u8", self.hlsdir + source.mkv(dir) + index.m3u8
-    # step3: access "http://../hlsvod/source.mkv/segment.ts", self.hlsdir + source.mkv(dir) + segement.ts
+    # hls-play:
+    #   http://../source.mkv, http://../source.mkv/index.m3u8, http://../source.mkv/segment.ts
+    # step0: check "." + source.mkv,
+    # step1: check self.workdir + source.mkv
+    # step2: check self.hlsdir + source.mkv/index.m3u8
+    # step3: check self.hlsdir + source.mkv/segment.ts
     async def check_hls(self, uri, headers):
-        path = self.translate_path(uri)
-        #logging.info(["webhandler, begin:", path])
-        cpath = os.path.join(".", path)
-        if os.path.isfile(cpath):
-            return self.send_static(cpath, headers)
+        prefix = "%s/" % self.hlskey
+        opath = self.translate_path(uri)
 
-        ## check workdir default
+        path = opath
+        pos_prefix = opath.find(prefix)
+        if pos_prefix == 0:
+            path = opath[len(prefix):]
+        cpath = os.path.join(".", path)
         fpath = os.path.join(self.workdir, path)
-        if os.path.isdir(fpath):
+        bname = os.path.basename(path)
+        logging.info(["webhandler, begin:", uri, path, bname])
+
+        ## check curr file/dir
+        if os.path.isdir(cpath):
             for index in "index.html", "index.htm":
-                index = os.path.join(fpath, index)
-                if os.path.exists(index):
-                    fpath = index
+                index = os.path.join(cpath, index)
+                if os.path.isfile(index):
+                    cpath = index
                     break
             else:
-                return self.list_directory(path, fpath)
-        if fpath.endswith("/"):
+                return self.list_directory(opath, cpath)
+        if os.path.isfile(cpath):
+            return self.send_static(cpath, headers)
+        if bname == "favicon.ico":
+            return web.HTTPNotFound(reason="File not found")
+
+        ## check workdir(media source)
+        if fpath.endswith("/") or os.path.isdir(fpath):
             return web.HTTPNotFound(reason="File not found")
         if os.path.isfile(fpath):
             return self.send_static(fpath, headers)
 
-        ## check hls extensions
-        parts = os.path.splitext(fpath)
+        ## --- check hlsvod ---
+
+        ## check extensions
+        parts = os.path.splitext(path)
         if not self.support_exts.get(parts[1]):
-            logging.warning(["webhandler, unsupport ext: ", fpath])
+            logging.warning(["webhandler, unsupport media ext: ", path])
             return web.HTTPNotFound(reason="File not found")
 
-        ##-----
-        ## wait m3u8 update if not modified
-        prefix = "%s/" % self.hlskey
-        if os.path.basename(path) == "index.m3u8":
-            #-- parse source
-            pos1 = path.find(prefix)
-            pos2 = path.rfind("/")
-            if pos2 == -1:
-                return web.HTTPBadRequest()
-            source = path[:pos2]
-            if pos1 == 0 and pos1 + len(prefix) <= pos2:
-                source = path[pos1+len(prefix):pos2]
-            #logging.info(["webhandler, m3u8 source:", source])
+        ## check source
+        pos = path.rfind("/")
+        if pos == -1:
+            logging.warning(["webhandler, no base name(/):", path])
+            return web.HTTPBadRequest()
+        source = path[:pos]
+        src_fpath = os.path.join(self.workdir, source)
+        dst_fpath = os.path.join(self.hlsdir, source)
+        if not os.path.isfile(src_fpath):
+            logging.warning(["webhandler, hls source not exist:", src_fpath])
+            return web.HTTPNotFound(reason="Source file not found")
+        user_fpath = os.path.join(self.hlsdir, path)
+        message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+        logging.info(["webhandler, hls source:", source, bname, user_fpath])
 
-            src_fpath = os.path.join(self.workdir, source)
-            dst_fpath = os.path.join(self.hlsdir, source)
-            m3u8_fpath = os.path.join(dst_fpath, "index.m3u8")
-            if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                logging.warning(["webhandler, m3u8 source not exists:", src_fpath])
-                return web.HTTPNotFound(reason="Source file not found")
+        # send direct if exist
+        hextm = MediaExtm3u8()
+        hextm.parse(dst_fpath)
+        if hextm.is_end:
+            # TODO: how to process index.m3u8 complete but segment not exists??
+            logging.info(["webhandler, m3u8 transcode complete:", path])
+            return self.send_static(user_fpath, headers)
 
-            # parse
-            hextm = MediaExtm3u8()
-            hextm.parse(dst_fpath)
-
-            if pos1 != 0: # no prefix
-                #-- check source info
-                minfo = MediaInfo()
-                if not minfo.parse(src_fpath):
-                    logging.warning(["webhandler, m3u8, unsupport media:", src_fpath])
-                    return web.HTTPUnsupportedMediaType()
-                if minfo.isWebDirectSupport():
-                    path2 = os.path.join("/", source)
-                    logging.info(["webhandler, redirect to source(not to transcode):", path2])
-                    return web.HTTPTemporaryRedirect(location=path2)
-
-                if not hextm.is_end:
-                    #TODO: prepare
-                    logging.info(["webhandler, m3u8 prepare1:", source])
-                    message = HlsMessage("prepare", source, src_fpath, dst_fpath)
-                    bret = self.hlscenter.post_service(message)
-                    if not bret:
-                        logging.warning(["webhandler, m3u8 prepare1 failed:", source])
-                        return web.HTTPTooManyRequests()
-                    delay = 2
-                    if not hextm.is_begin or hextm.last_seq < 3:
-                        delay = 5
-                    await asyncio.sleep(delay)
-
-                #-- redirect
-                path2 = os.path.join(prefix, path)
-                path2 = os.path.join("/", path2)
-                logging.info(["webhandler, m3u8 to redirect:", path2])
-                return web.HTTPTemporaryRedirect(location=path2)
-
-            # send direct
-            if hextm.is_end:
-                logging.info(["webhandler, m3u8 is complete(transcode end):", m3u8_fpath])
-                return self.send_static(m3u8_fpath, headers)
-
-            # TODO: prepare
-            logging.info(["webhandler, m3u8 prepare2:", source, hextm.last_seq])
-            message = HlsMessage("prepare", source, src_fpath, dst_fpath)
+        ## check segment directly
+        seg_fpath = user_fpath
+        if bname != "index.m3u8":
             bret = self.hlscenter.post_service(message)
-
-            # delay
-            delay = 1
-            if not hextm.is_begin or hextm.last_seq < 5:
-                delay = 2
-            if not os.path.exists(m3u8_fpath):
-                delay = 3
-            await asyncio.sleep(delay)
-            #hextm.parse(dst_fpath)
-            #logging.info(["webhandler, m3u8 check-media:", source, hextm.last_seq, bret])
-
-            #-- check m3u8
-            if not os.path.exists(m3u8_fpath):
-                if not bret:
-                    logging.warning(["webhandler, m3u8 prepare2 failed:", m3u8_fpath])
-                    return web.HTTPTooManyRequests()
-            return self.send_static(m3u8_fpath, headers)
-
-        ##-----
-        ## wait segment update if not exist
-        pos1 = path.find(prefix)
-        if pos1 == 0:
-            #-- parse source and segment
-            pos2 = path.rfind("/")
-            if pos1 + len(prefix) >= pos2:
-                return web.HTTPBadRequest()
-            segment = path[pos1+len(prefix):]
-            source = path[pos1+len(prefix):pos2]
-            logging.info(["webhandler, segment file:", segment])
-
-            src_fpath = os.path.join(self.workdir, source)
-            dst_fpath = os.path.join(self.hlsdir, source)
-            seg_fpath = os.path.join(self.hlsdir, segment)
-            if not os.path.exists(src_fpath) or not os.path.isfile(src_fpath):
-                logging.warning(["webhandler, segment source not exist:", src_fpath])
-                return web.HTTPNotFound(reason="Source file not found")
-
-            hextm = MediaExtm3u8()
-            hextm.parse(dst_fpath)
-            if not hextm.is_end:
-                message = HlsMessage("prepare", source, src_fpath, dst_fpath)
-                bret = self.hlscenter.post_service(message)
-                if not bret and not os.path.exists(seg_fpath):
-                    logging.warning(["webhandler, segment prepare failed:", m3u8_fpath])
-                    return web.HTTPTooManyRequests()
+            if not os.path.isfile(seg_fpath) and not bret:
+                logging.warning(["webhandler, segment prepare failed:", path])
+                return web.HTTPTooManyRequests()
             return self.send_static(seg_fpath, headers)
-        return web.HTTPBadRequest()
+
+        ## check m3u8
+        m3u8_fpath = user_fpath
+        if not os.path.exists(m3u8_fpath):
+            minfo = MediaInfo()
+            if not minfo.parse(src_fpath):
+                logging.warning(["webhandler, m3u8 unsupport media:", path])
+                return web.HTTPUnsupportedMediaType()
+            if minfo.isWebDirectSupport():
+                mpath = os.path.join("/%s" % prefix, source)
+                logging.info(["webhandler, m3u8 redirect to media:", mpath])
+                return web.HTTPTemporaryRedirect(location=mpath)
+
+            bret = self.hlscenter.post_service(message)
+            if not bret:
+                logging.warning(["webhandler, m3u8 prepare1 failed:", path])
+                return web.HTTPTooManyRequests()
+            logging.info(["webhandler, m3u8 prepare1 media:", path])
+            await asyncio.sleep(3)
+            mpath = os.path.join("/%s" % prefix, path)
+            logging.info(["webhandler, m3u8 redirect to m3u8:", mpath])
+            return web.HTTPTemporaryRedirect(location=mpath)
+
+        # prepare2
+        bret = self.hlscenter.post_service(message)
+        logging.info(["webhandler, m3u8 prepare2:", bret, path, hextm.last_seq])
+        if bret:
+            delay = 1
+            if hextm.last_seq < 5: delay = 2
+            await asyncio.sleep(delay)
+        return self.send_static(m3u8_fpath, headers)
+
 
     async def do_File(self, request):
         try:
@@ -1600,6 +1568,7 @@ def do_test_coder():
     coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_video.ts", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_audio.ts", "/tmp/output", 0, 5)
+    #coder.do_hlsvod("samples/test_hd.mov", "/tmp/output", 0, 5)
 
 def do_test():
     set_log_path(None)
@@ -1608,9 +1577,11 @@ def do_test():
     time.sleep(30)
     pass
 
-def do_main(srcPath, dstPath, maxCount):
+def do_main(srcPath, dstPath, maxCount, stdout=False):
     try:
-        set_log_path("/tmp/hls_client.txt")
+        logf = "/tmp/hls_client.txt"
+        if stdout: logf = None
+        set_log_path(logf)
         logging.info(["main, start...", srcPath, dstPath, maxCount])
 
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
@@ -1631,6 +1602,7 @@ def do_main(srcPath, dstPath, maxCount):
 # should use __main__ to support child-process
 if __name__ == "__main__":
     #do_test()
-    do_main("/deepnas/home", "/opt/wspace/cache", 2)
+    #do_main("/deepnas/home", "/opt/wspace/cache", 2)
     #do_main(None, "/home/linaro/wspace/hlscache", 1)
+    do_main(None, None, 1, True)
     sys.exit(0)
