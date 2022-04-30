@@ -60,6 +60,9 @@ def pyver():
 def nowtime(): #ms
     return int(time.time()*1000)
 
+def nowtime_sec(): #sec
+    return int(time.time())
+
 def copyfile(source, dest):
     shutil.copyfile(source, dest)
 
@@ -86,6 +89,35 @@ async def wait_file_exist(fname, timeout=0):
         await asyncio.sleep(interval)
         if os.path.exists(fname): return True
     return False
+
+def check_cache_timeout(cpath, name, timeout=3600*10):
+    if cpath.find("cache") == -1: return
+    timeouts = []
+    now = nowtime_sec()
+    shbin = "find \"%s\" -name \"%s\" 2>/dev/null" % (cpath, name)
+    lines = os.popen(shbin)
+    for line in lines:
+        try:
+            fname = line.strip()
+            f = open(fname, "rb")
+            try:
+                fs = os.fstat(f.fileno())
+                diff0 = int(now) - int(fs.st_mtime)
+                diff1 = int(now) - int(fs.st_atime)
+                #logging.info([diff0, diff1, fname])
+                if diff0 > timeout and diff1 > timeout:
+                    timeouts.append(os.path.dirname(fname))
+            except:
+                logging.warning(["cache, file error1"])
+                pass
+            f.close()
+        except:
+            logging.warning(["cache, file error2"])
+            pass
+    for path in timeouts:
+        logging.info(["cache, remove timeout path:", path])
+        shutil.rmtree(path)
+    pass
 
 
 #======== gstreamer service
@@ -319,7 +351,8 @@ def hls_parse_segment(line, default=None):
 
 #========== file monitor
 class MediaMonitor(events.FileSystemEventHandler):
-    def __init__(self):
+    def __init__(self, bname):
+        self.bname = bname
         self.observer = None
         self.last_path = None
         self.last_lines = []
@@ -333,7 +366,7 @@ class MediaMonitor(events.FileSystemEventHandler):
 
     def check_path_modified(self, fname):
         if not os.path.isfile(fname): return
-        if os.path.basename(fname) != "index.m3u8": return
+        if os.path.basename(fname) != self.bname: return
         fp = open(fname, "r")
         if not fp: return
         new_lines = fp.readlines()
@@ -636,14 +669,15 @@ class MediaInfo(object):
             return False
         try:
             fp = open(infile, "rb")
-            fs = os.fstat(fp.fileno())
+            try:
+                fs = os.fstat(fp.fileno())
+                bps = fs.st_size * 8 / self.duration()
+                info["filesize"] = fs.st_size
+                info["bitrate"] = int(bps)
+            except:
+                pass
             fp.close()
-            bps = fs.st_size * 8 / self.duration()
-            info["filesize"] = fs.st_size
-            info["bitrate"] = int(bps)
         except:
-            info["filesize"] = 0
-            info["bitrate"] = 0
             pass
         #print(info)
         #logging.info(["coder media:", info])
@@ -677,7 +711,7 @@ class Transcoder(object):
         logging.info("gst-coder, %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
         # output
         outfile = os.path.join(outpath, "index.ts")
-        playlist = os.path.join(outpath, "index.m3u8")
+        playlist = os.path.join(outpath, "playlist.m3u8")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
         options = {
             "max-files": 1000000,
@@ -687,7 +721,7 @@ class Transcoder(object):
             "location": segment,
         }
 
-        self.start_pos = inpos
+        self.start_pos = int(inpos)
         sink = "hlssink"
         for k,v in options.items():
             if type(v) == int: sink = "%s %s=%s" % (sink, k, v)
@@ -747,16 +781,15 @@ class Transcoder(object):
         parts2.append("%s name=fs" % sink)
 
         if vType:
+            queue = gst_common_queue(0, 0)
             parts2.append("psrc0. ! db0.")
-            parts2.append("db0. ! video/x-raw ! queue ! eb.video_0")
+            parts2.append("db0. ! video/x-raw ! %s ! eb.video_0" % queue)
         if aType:
+            queue = gst_common_queue(0, 0)
             parts2.append("psrc1. ! db1.")
-            parts2.append("db1. ! audio/x-raw ! queue ! eb.audio_0")
+            parts2.append("db1. ! audio/x-raw ! %s ! eb.audio_0" % queue)
 
-        interval = 3000
-        if aType and not vType: interval = 1000
-        queue = gst_common_queue(interval, 0)
-
+        queue = gst_common_queue(0, 0)
         parts2.append("eb. ! %s ! fs." % queue)
         sstr2 = " ".join(parts2)
         logging.info(["gst-coder, pipeline2:", sstr2])
@@ -969,7 +1002,7 @@ class HlsService:
         if os.path.exists(fdst_tmp):
             shutil.rmtree(fdst_tmp)
         os.makedirs(fdst_tmp, exist_ok=True)
-        mmon = MediaMonitor()
+        mmon = MediaMonitor("playlist.m3u8")
         mmon.start(fdst_tmp, self.on_mon_changed)
         self.monitor = mmon
 
@@ -1089,6 +1122,7 @@ def run_hls_service(conn, index):
     logging.info(["run_hls_service begin, pid", os.getpid(), os.getppid()])
     hls = HlsService(conn)
     hls.run_forever()
+    conn.close()
 
 
 #======== parent-process hls-client
@@ -1184,17 +1218,51 @@ def createHls(index):
     return cli
 
 class HlsCenter:
-    def __init__(self, count):
+    def __init__(self, dstPath, count):
+        self.dstPath = dstPath
         self.count = count
         self.services = []
+        self.ploop = None
         pass
+
+    def _cache_checking(self, p):
+        last_time = nowtime_sec()
+        while True:
+            try:
+                ret = p.poll(600)
+            except:
+                ret = True
+            if ret:
+                logging.warning("cache, pipe error or closed")
+                break
+            try:
+                now = nowtime_sec()
+                if now >= last_time + 3600:
+                    #TODO: thread security
+                    #check_cache_timeout(self.dstPath, "index.m3u8")
+                    last_time = now
+            except:
+                pass
+        p.close()
+        pass
+    def _start_loop(self):
+        p1, p2 = Pipe(True)
+        thread.start_new_thread(self._cache_checking, (p1, ))
+        self.ploop = p2
+    def _stop_loop(self):
+        if self.ploop:
+            self.ploop.close()
+            self.ploop = None
+
     def init_services(self):
+        self._start_loop()
         items = []
         for idx in range(self.count):
             items.append(createHls(idx))
         self.services = items
         time.sleep(1)
     def stop_services(self):
+        self._stop_loop()
         for item in self.services:
             item.stop()
         self.services = []
@@ -1262,7 +1330,7 @@ class MyHTTPRequestHandler:
         self.hlsdir = os.fspath(dstPath)
         if maxCount <= 0:
             maxCount = 1
-        self.hlscenter = HlsCenter(maxCount)
+        self.hlscenter = HlsCenter(dstPath, maxCount)
         self.hlskey = "hlsvod"
 
     def init(self):
@@ -1349,6 +1417,7 @@ class MyHTTPRequestHandler:
             if not os.path.isfile(seg_fpath) and not bret:
                 logging.warning(["webhandler, segment prepare failed:", path])
                 return web.HTTPTooManyRequests()
+            await asyncio.sleep(1)
             return self.send_static(seg_fpath, headers)
 
         ## check m3u8
@@ -1389,11 +1458,10 @@ class MyHTTPRequestHandler:
             headers = request.headers
             uri = request.match_info["uri"]
         except Exception as e:
-            logging.info(["do_File error:", e])
+            logging.warning(["do_File error:", e])
             return web.HTTPBadRequest()
         else:
             resp = await self.check_hls(uri, headers)
-            #print(uri, resp)
             return resp
 
     def send_static(self, fpath, headers):
@@ -1407,21 +1475,19 @@ class MyHTTPRequestHandler:
         return web.FileResponse(path=fpath, headers=headers2, status=200)
 
     def read_mtime(self, fpath):
-        if not os.path.isfile(fpath):
-            return web.HTTPNotFound(reason="File not found"), None
         try:
+            mtime = 0
             f = open(fpath, 'rb')
-        except OSError:
-            return web.HTTPNotFound(reason="File not found"), None
-        try:
-            rets = [None, None]
-            fs = os.fstat(f.fileno())
-            rets[1] = fs.st_mtime
-        except:
-            rets[0] = web.HTTPInternalServerError()
-        finally:
+            try:
+                fs = os.fstat(f.fileno())
+                mtime = fs.st_mtime
+            except:
+                return web.HTTPInternalServerError(), None
             f.close()
-        return rets[0], rets[1]
+            return None, mtime
+        except:
+            pass
+        return web.HTTPNotFound(reason="File not found"), None
 
     def check_modified(self, mtime, headers):
         if not ("If-Modified-Since" in headers and "If-None-Match" not in headers):
@@ -1543,7 +1609,7 @@ async def run_web_server(handler):
     addr = "0.0.0.0"
     #addr = "localhost"
     port = "8001"
-    logging.info(["main, start server:", addr, port])
+    logging.info(["web, start server:", addr, port])
     app = web.Application(middlewares=[])
     app.add_routes([
         web.get(r'/{uri:.*}', handler.do_File),
@@ -1555,7 +1621,7 @@ async def run_web_server(handler):
 
 async def run_other_task():
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(10)
 
 
 def do_test_coder():
@@ -1573,6 +1639,7 @@ def do_test_coder():
 def do_test():
     set_log_path(None)
     logging.info("=======testing begin========")
+    #check_cache_timeout("/tmp/cached", "index.m3u8")
     thread.start_new_thread(do_test_coder, ())
     time.sleep(30)
     pass
