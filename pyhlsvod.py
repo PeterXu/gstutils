@@ -90,34 +90,50 @@ async def wait_file_exist(fname, timeout=0):
         if os.path.exists(fname): return True
     return False
 
-def check_cache_timeout(cpath, name, timeout=3600*10):
+# timeout(min), maxsize(MB)
+# when max-size >= 10GB, then remove timeout paths(default 20Hours)
+def check_cache_timeout(cpath, name, timeout=1200, maxsize=10240):
+    check_init = '''
+cpath=\"%s\"
+name=\"%s\"
+timeout=%d #min
+maxsize=%d #mb
+'''
+    check_body = '''
+msize=$(du -sm "$cpath"  | awk '{print $1}')
+if [ $msize -lt $maxsize ]; then
+    echo
+    exit 0
+fi
+now=$(date +%s)
+os=$(uname)
+tname="/tmp/cexec_$now.sh"
+cat > $tname <<EOF
+fname="\$1"
+dname=\$(dirname "\$fname")
+echo "\$fname, \$dname"
+rm -rf "\$dname"
+EOF
+if [ "$os" = "Darwin" ]; then
+    utime="+${timeout}m"
+    find "$cpath" -mtime $utime -atime $utime -name "$name" -exec sh $tname "{}" \; 2>/dev/null
+else
+    utime="+${timeout}"
+    find "$cpath" -mmin $utime -amin $utime -name "$name" -exec sh $tname "{}" \; 2>/dev/null
+fi
+rm -f $tname
+exit 0
+'''
+    logging.info(["cache-check", cpath])
     if cpath.find("cache") == -1: return
-    timeouts = []
-    now = nowtime_sec()
-    shbin = "find \"%s\" -name \"%s\" 2>/dev/null" % (cpath, name)
+    shinit = check_init % (cpath, name, timeout, maxsize)
+    shbin = "%s%s" % (shinit, check_body)
+    #print(shbin)
     lines = os.popen(shbin)
     for line in lines:
-        try:
-            fname = line.strip()
-            f = open(fname, "rb")
-            try:
-                fs = os.fstat(f.fileno())
-                diff0 = int(now) - int(fs.st_mtime)
-                diff1 = int(now) - int(fs.st_atime)
-                #logging.info([diff0, diff1, fname])
-                if diff0 > timeout and diff1 > timeout:
-                    timeouts.append(os.path.dirname(fname))
-            except:
-                logging.warning(["cache, file error1"])
-                pass
-            f.close()
-        except:
-            logging.warning(["cache, file error2"])
-            pass
-    for path in timeouts:
-        logging.info(["cache, remove timeout path:", path])
-        shutil.rmtree(path)
-    pass
+        logging.info(["cache-remove", line])
+        pass
+    return
 
 
 #======== gstreamer service
@@ -1237,9 +1253,9 @@ class HlsCenter:
                 break
             try:
                 now = nowtime_sec()
-                if now >= last_time + 3600:
+                if now >= last_time + 7200:
                     #TODO: thread security
-                    #check_cache_timeout(self.dstPath, "index.m3u8")
+                    check_cache_timeout(self.dstPath, "index.m3u8")
                     last_time = now
             except:
                 pass
@@ -1639,9 +1655,9 @@ def do_test_coder():
 def do_test():
     set_log_path(None)
     logging.info("=======testing begin========")
-    #check_cache_timeout("/tmp/cached", "index.m3u8")
-    thread.start_new_thread(do_test_coder, ())
-    time.sleep(30)
+    check_cache_timeout("/tmp/cached", "index.m3u8")
+    #thread.start_new_thread(do_test_coder, ())
+    #time.sleep(30)
     pass
 
 def do_main(srcPath, dstPath, maxCount, stdout=False):
