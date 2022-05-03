@@ -80,48 +80,21 @@ def set_log_path(path):
         logging.basicConfig(filename=path, format=formatter, datefmt=datefmt, level=logging.INFO)
     pass
 
-# timeout(min), maxsize(MB)
-# when max-size >= 10GB, then remove timeout paths(default 20Hours)
-def check_cache_timeout(cpath, name, timeout=1200, maxsize=10240):
-    check_init = '''
-cpath=\"%s\"
-name=\"%s\"
-timeout=%d #min
-maxsize=%d #mb
-'''
-    check_body = '''
-msize=$(du -sm "$cpath"  | awk '{print $1}')
-if [ $msize -lt $maxsize ]; then
-    echo
-    exit 0
-fi
-now=$(date +%s)
-os=$(uname)
-tname="/tmp/cexec_$now.sh"
-cat > $tname <<EOF
-fname="\$1"
-dname=\$(dirname "\$fname")
-echo "\$fname, \$dname"
-rm -rf "\$dname"
-EOF
-if [ "$os" = "Darwin" ]; then
-    utime="+${timeout}m"
-    find "$cpath" -mtime $utime -atime $utime -name "$name" -exec sh $tname "{}" \; 2>/dev/null
-else
-    utime="+${timeout}"
-    find "$cpath" -mmin $utime -amin $utime -name "$name" -exec sh $tname "{}" \; 2>/dev/null
-fi
-rm -f $tname
-exit 0
-'''
-    logging.info(["cache-check", cpath])
+# timeout(hour)
+def check_cache_timeout(cpath, name, timeout_hour=20):
+    tosec = int(timeout_hour) * 3600
+    logging.info(["cache-check", cpath, tosec])
     if cpath.find("cache") == -1: return
-    shinit = check_init % (cpath, name, timeout, maxsize)
-    shbin = "%s%s" % (shinit, check_body)
-    #print(shbin)
-    lines = os.popen(shbin)
-    for line in lines:
-        logging.info(["cache-check, remove", line])
+    now = nowtime_sec()
+    items = sorted(pathlib.Path(cpath).glob('**/%s' % name))
+    for item in items:
+        stat = pathlib.Path(item).stat()
+        #logging.info([stat, now, tosec])
+        if now >= stat.st_atime + tosec and now >= stat.st_mtime + tosec:
+            dname = os.path.dirname(item)
+            logging.info(["cache-check, remove", dname])
+            shutil.rmtree(dname)
+            pass
     pass
 
 
@@ -1126,7 +1099,7 @@ class HlsCenter:
                 now = nowtime_sec()
                 if now >= last_time + 7200:
                     #TODO: thread security
-                    check_cache_timeout(self.dstPath, "index.m3u8", 600, 100)
+                    check_cache_timeout(self.dstPath, "index.m3u8")
                     last_time = now
             except:
                 pass
