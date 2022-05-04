@@ -142,9 +142,12 @@ def gst_audio_props(name, kbps):
     for k, v in props.items():
         if name.find(k) == 0: return v
     return None
-def gst_video_props(name, kbps):
+def gst_video_props(name, kbps, width=0, height=0):
     bps = kbps * 1024
-    props1 = {"rc-mode":"vbr", "bps-max":bps, "profile":"main",}
+    props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main", "gop":120}
+    if width > 0 and height > 0:
+        props1["width"] = width
+        props1["height"] = height
     props2 = {"pass":"pass1", "bitrate":bps, "profile":"main"}
     props3 = {"pass":"pass1", "bitrate":kbps}
     props = {
@@ -182,7 +185,7 @@ def gst_parse_props(line, key):
 def gst_discover_info(fname):
     info = {}
     uri = urllib.parse.urljoin("file://", os.path.abspath(fname))
-    shbin = "gst-discoverer-1.0 -v \"%s\"" % uri
+    shbin = "gst-discoverer-1.0 --use-cache -v \"%s\"" % uri
     lines = os.popen(shbin)
     for line in lines:
         if line.find("Duration: ") >= 0:
@@ -215,6 +218,25 @@ def gst_parse_value(item):
     elif stype == "boolean":
         return sval == "true"
     return sval
+
+def gst_video_size(width, height, fps=24):
+    if width > 1920:
+        height = int(height * 1920 / width / 4) * 4
+        width = 1920
+    if height > 1080:
+        width = int(width * 1080 / height / 4) * 4
+        height = 1080
+    kbps = [300, 600]
+    pixels = width * height
+    if pixels >= 1920*1080: kbps = [1500, 2500]
+    elif pixels >= 1280*720: kbps = [800, 1800]
+    elif pixels >= 960*540: kbps = [600, 1000]
+    info = []
+    info.append(int(kbps[0] * fps / 24))
+    info.append(int(kbps[1] * fps / 24))
+    info.append(width)
+    info.append(height)
+    return info
 
 def hls_parse_prop(line, default=None):
     pos1 = line.find(":")
@@ -592,11 +614,12 @@ class Transcoder(object):
         mType = minfo.muxType()
         aType = minfo.audioType()
         vType = minfo.videoType()
-        kbps = int(minfo.bitrate() / 1024)
-        logging.info(["gst-coder, media-type:", mType, aType, vType, kbps])
-        if kbps > 0:
-            if vType and kbps < vkbps: vkbps = kbps
-            if aType and kbps < akbps: akbps = kbps
+        vSize = None
+        if vType:
+            vSize = gst_video_size(minfo.width(), minfo.height(), minfo.frameRate())
+            if vkbps > vSize[1]: vkbps = vSize[1]
+            elif vkbps < vSize[0]: vkbps = vSize[0]
+        logging.info(["gst-coder, media-type:", mType, aType, vType, vkbps, vSize])
 
         mux = gst_ts_mux_profile()
         aac = gst_aac_enc_profile(akbps)
@@ -641,7 +664,7 @@ class Transcoder(object):
             parts2.append("psrc1. ! db1.")
             parts2.append("db1. ! audio/x-raw ! %s ! eb.audio_0" % queue)
 
-        queue = gst_common_queue(0, 0)
+        queue = gst_common_queue(3000, 0)
         parts2.append("eb. ! %s ! fs." % queue)
         sstr2 = " ".join(parts2)
         logging.info(["gst-coder, pipeline2:", sstr2])
@@ -649,16 +672,20 @@ class Transcoder(object):
         eb = p2.get_by_name("eb")
         logging.info(["gst-coder, pipeline2 ret:", p2, eb])
         if eb:
+            logging.info(["gst-coder, eb count:", eb.get_children_count()])
             for i in range(eb.get_children_count()):
                 e = eb.get_child_by_index(i)
-                props = gst_audio_props(e.get_name(), akbps)
-                if not props: props = gst_video_props(e.get_name(), vkbps)
+                props = None
+                if aType:
+                    props = gst_audio_props(e.get_name(), akbps)
+                if not props and vSize:
+                    props = gst_video_props(e.get_name(), vkbps, vSize[2], vSize[3])
                 if props:
                     for k, v in props.items():
-                        logging.info(["gst-coder, set-props:", e.get_name(), k, v])
+                        logging.info(["gst-coder, eb set-props:", e.get_name(), k, v])
                         e.set_property(k, v)
                 else:
-                    logging.info(["gst-coder, skip set-props:", e.get_name()])
+                    logging.info(["gst-coder, eb skip set-props:", e.get_name()])
         psrc0 = p2.get_by_name("psrc0")
         psrc1 = p2.get_by_name("psrc1")
 
@@ -1494,17 +1521,18 @@ def do_test_coder():
 
     coder = Transcoder()
     #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
+    #coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_video.ts", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_audio.ts", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_hd.mov", "/tmp/output", 0, 5)
+    coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
 
 def do_test():
     set_log_path(None)
     logging.info("=======testing begin========")
-    check_cache_timeout("/tmp/cached", "index.m3u8")
-    #thread.start_new_thread(do_test_coder, ())
-    #time.sleep(30)
+    #check_cache_timeout("/tmp/cached", "index.m3u8")
+    thread.start_new_thread(do_test_coder, ())
+    time.sleep(300)
     pass
 
 def do_main(srcPath, dstPath, maxCount, stdout=False):
