@@ -9,8 +9,6 @@ import os
 import sys
 import re
 import time
-import random
-import string
 import shutil
 import datetime
 import mimetypes
@@ -18,7 +16,6 @@ import posixpath
 import pathlib
 import logging
 import multiprocessing
-from multiprocessing import Process, Pipe
 import threading
 
 import html
@@ -62,6 +59,10 @@ def copyfile(source, dest):
 def movefile(source, dest):
     shutil.move(source, dest)
 
+def touchpath(path):
+    tpath = pathlib.Path(path)
+    tpath.touch()
+
 def tonumber(val, default=None):
     try:
         ret = default
@@ -71,13 +72,32 @@ def tonumber(val, default=None):
         except: pass
     return ret
 
+log_path = "/tmp"
 def set_log_path(path):
+    if not path:
+        log_path = "/tmp"
+        return
+    try:
+        dpath = os.path.dirname(path)
+        if dpath and os.path.exists(dpath):
+            os.makedirs(path, exist_ok=True)
+            touchpath(path)
+            log_path = path
+            print("[-] set log path: ", path)
+            return
+    except:
+        pass
+    print("[-] fail to set log path:", path)
+
+def set_log_file(fname):
+    if fname and log_path:
+        fname = os.path.join(log_path, fname)
     formatter = '%(asctime)s - [%(levelname)s] - %(message)s'
     datefmt = '%m/%d/%Y %H:%M:%S'
     if pyver() >= 39:
-        logging.basicConfig(filename=path, encoding='utf-8', format=formatter, datefmt=datefmt, level=logging.INFO)
+        logging.basicConfig(filename=fname, encoding='utf-8', format=formatter, datefmt=datefmt, level=logging.INFO)
     else:
-        logging.basicConfig(filename=path, format=formatter, datefmt=datefmt, level=logging.INFO)
+        logging.basicConfig(filename=fname, format=formatter, datefmt=datefmt, level=logging.INFO)
     pass
 
 # timeout(hour)
@@ -581,15 +601,15 @@ class Transcoder(object):
     def outdated(self):
         return self.working == -1
 
-    def do_hlsvod(self, infile, outpath, inpos, duration):
-        logging.info("gst-coder, %s - %s, start: %s, duration: %d", infile, outpath, inpos, duration)
+    def do_hlsvod(self, infile, outpath, inpos, segtime):
+        logging.info("gst-coder, %s - %s, start: %s, segment-time: %d", infile, outpath, inpos, segtime)
         # output
         outfile = os.path.join(outpath, "index.ts")
         playlist = os.path.join(outpath, "playlist.m3u8")
         segment = os.path.join(outpath, "hls_segment_%06d.ts")
         options = {
             "max-files": 1000000,
-            "target-duration": duration,
+            "target-duration": segtime,
             "playlist-length": 0,
             "playlist-location": playlist,
             "location": segment,
@@ -802,7 +822,9 @@ class HlsMessage:
         self.name = name
         self.fsrc = fsrc
         self.fdst = fdst
-        self.duration = 10
+
+        self.segtime = 10 #seconds
+        self.quality = "default" #low/medium/high
         self.result = None
     def str(self):
         return "%s:%s:%s:%s" % (self.mtype, self.name, self.fsrc, self.fdst)
@@ -830,10 +852,10 @@ class HlsService:
             self.extm3u8 = None
         self.last_coder_time = 0
 
-    def _loop(self, coder, fsrc, fdst, fpos, duration):
+    def _loop(self, coder, fsrc, fdst, fpos, segtime):
         try:
             logging.info("hls-srv, loop begin...")
-            coder.do_hlsvod(fsrc, fdst, fpos, duration)
+            coder.do_hlsvod(fsrc, fdst, fpos, segtime)
         except Exception as e:
             logging.warning("hls-srv, loop error: %s", e)
         except:
@@ -863,14 +885,14 @@ class HlsService:
             coder.do_stop()
         self._reset()
 
-    def start_coder(self, source, fsrc, fdst, duration):
+    def start_coder(self, source, fsrc, fdst, segtime):
         minfo = MediaInfo()
         if not minfo.parse(fsrc):
             return False
 
         # final destination
         extm = MediaExtm3u8()
-        if not extm.open(fdst, duration):
+        if not extm.open(fdst, segtime):
             return False
         if extm.is_end:
             logging.info("hls-srv, coder had end and nop")
@@ -897,7 +919,7 @@ class HlsService:
         self.coder = Transcoder()
         fpos = extm.probe_pos
         logging.info("hls-srv, coder start, pos=%s", fpos)
-        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, duration))
+        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, segtime))
         logging.info("hls-srv, coder end...")
 
     def on_mon_changed(self, path, lines):
@@ -939,8 +961,8 @@ class HlsService:
         os.sync()
         pass
 
-    def prepare_coder(self, source, fsrc, fdst, duration):
-        if duration < 5: duration = 5
+    def prepare_coder(self, source, fsrc, fdst, segtime):
+        if segtime < 5: segtime = 5
         if not source or not fsrc or not fdst:
             logging.warning("hls-srv, invalid coder args")
             return False
@@ -958,7 +980,7 @@ class HlsService:
                 return False
             self.last_coder_time = nowtime()
             return True
-        ret = self.start_coder(source, fsrc, fdst, duration)
+        ret = self.start_coder(source, fsrc, fdst, segtime)
         return ret
 
     def on_hls_message(self, msg):
@@ -967,7 +989,7 @@ class HlsService:
             return
         logging.info("hls-srv, recv message: %s", msg.str())
         resp = HlsMessage("ack", msg.name)
-        if self.prepare_coder(msg.name, msg.fsrc, msg.fdst, msg.duration):
+        if self.prepare_coder(msg.name, msg.fsrc, msg.fdst, msg.segtime):
             resp.result = True
         else:
             resp.result = False
@@ -1003,8 +1025,7 @@ class HlsService:
 
 
 def run_hls_service(conn, index):
-    logf = "/tmp/hls_service_%d.txt" % index
-    set_log_path(logf)
+    set_log_file("hls_service_%d.txt" % index)
     logging.info("=====================\n\n")
     logging.info(["run_hls_service begin, pid", os.getpid(), os.getppid()])
     hls = HlsService(conn)
@@ -1022,6 +1043,7 @@ class HlsClient:
         self.source = None
         self.tmp_source = None
         self.last_backend_time = nowtime()
+        self.last_up_time = nowtime_sec()  #sec
 
     def no_focus(self):
         return (self.source is None) and (self.tmp_source is None)
@@ -1046,6 +1068,9 @@ class HlsClient:
 
     def is_backend_timeout(self):
         return nowtime() >= self.last_backend_time + 3000
+
+    def is_up_timeout(self):
+        return nowtime_sec() >= self.last_up_time + 3600*24
 
     def post_message(self, msg):
         self.conn.send(msg)
@@ -1113,6 +1138,7 @@ class HlsCenter:
         pass
 
     def _cache_checking(self, p):
+        timeout = 7200
         last_time = nowtime_sec()
         while True:
             try:
@@ -1124,7 +1150,7 @@ class HlsCenter:
                 break
             try:
                 now = nowtime_sec()
-                if now >= last_time + 7200:
+                if now >= last_time + timeout:
                     #TODO: thread security
                     check_cache_timeout(self.dstPath, "index.m3u8")
                     last_time = now
@@ -1133,7 +1159,7 @@ class HlsCenter:
         p.close()
         pass
     def _start_loop(self):
-        p1, p2 = Pipe(True)
+        p1, p2 = multiprocessing.Pipe(True)
         thread.start_new_thread(self._cache_checking, (p1, ))
         self.ploop = p2
     def _stop_loop(self):
@@ -1158,8 +1184,11 @@ class HlsCenter:
         items = []
         for idx in range(self.count):
             item = self.services[idx]
-            if item.is_alive() and item.is_backend_timeout():
+            if item.is_backend_timeout():
                 logging.info("hls-center, one service timeout and stop")
+                item.stop()
+            elif item.no_focus() and item.is_up_timeout():
+                logging.info("hls-center, one service up-timeout and stop")
                 item.stop()
             if item.is_alive():
                 items.append(item)
@@ -1187,11 +1216,10 @@ class HlsCenter:
 
 #======== parent-process web
 class MyHTTPRequestHandler:
-    server_version = "pyhls/1.0"
+    server_version = "hlsvod/1.0"
     support_exts = {
         '.m3u8': True,
         '.ts':   True,
-        '.mp4':  True,
     }
     extensions_map = {
         '.gz': 'application/gzip',
@@ -1295,8 +1323,8 @@ class MyHTTPRequestHandler:
         if hextm.is_end:
             if bname == "index.m3u8" and os.path.exists(user_fpath):
                 logging.info(["webhandler, m3u8 transcode complete:", path])
-                tpath = pathlib.Path(user_fpath)
-                tpath.touch()
+                try: touchpath(user_fpath)
+                except: pass
             # TODO: how to process index.m3u8 complete but segment not exists??
             return self.send_static(user_fpath, headers)
 
@@ -1518,6 +1546,7 @@ def do_test_coder():
     #ftest = MediaExtm3u8()
     #ftest.open("index.m3u8", 5)
     #print(ftest.last_seq, ftest.duration, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
+    #ftest.close()
 
     coder = Transcoder()
     #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
@@ -1528,7 +1557,7 @@ def do_test_coder():
     coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
 
 def do_test():
-    set_log_path(None)
+    set_log_file(None)
     logging.info("=======testing begin========")
     #check_cache_timeout("/tmp/cached", "index.m3u8")
     thread.start_new_thread(do_test_coder, ())
@@ -1537,9 +1566,9 @@ def do_test():
 
 def do_main(srcPath, dstPath, maxCount, stdout=False):
     try:
-        logf = "/tmp/hls_client.txt"
+        logf = "hls_client.txt"
         if stdout: logf = None
-        set_log_path(logf)
+        set_log_file(logf)
         logging.info(["main, start...", srcPath, dstPath, maxCount])
 
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
@@ -1559,6 +1588,7 @@ def do_main(srcPath, dstPath, maxCount, stdout=False):
 
 # should use __main__ to support child-process
 if __name__ == "__main__":
+    set_log_path("/var/log/hlsvod")
     #do_test()
     #do_main("/deepnas/home", "/opt/wspace/cache", 2)
     #do_main(None, "/home/linaro/wspace/hlscache", 2)
