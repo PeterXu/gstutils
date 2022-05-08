@@ -100,11 +100,13 @@ def set_log_file(fname):
         logging.basicConfig(filename=fname, format=formatter, datefmt=datefmt, level=logging.INFO)
     pass
 
-# timeout(hour)
-def check_cache_timeout(cpath, name, timeout_hour=20):
-    tosec = int(timeout_hour) * 3600
+def check_cache_size(cpath, maxMB):
+    shbin = "M=$(du -sm \"%s\" 2>/dev/null | awk '{print $1}' 2>/dev/null); test $M -gt %s 2>/dev/null" % (cpath, maxMB)
+    ret = os.system(shbin)
+    return (ret == 0)
+
+def clean_cache_size(cpath, name, tosec):
     logging.info(["cache-check", cpath, tosec])
-    if cpath.find("cache") == -1: return
     now = nowtime_sec()
     items = sorted(pathlib.Path(cpath).glob('**/%s' % name))
     for item in items:
@@ -115,6 +117,14 @@ def check_cache_timeout(cpath, name, timeout_hour=20):
             logging.info(["cache-check, remove", dname])
             shutil.rmtree(dname)
             pass
+    pass
+
+def check_cache_timeout(cpath, name, maxsize_mb=1024*10, timeout_sec=3600*4):
+    if cpath.find("cache") == -1: return
+    while timeout_sec >= 3600:
+        if not check_cache_size(cpath, maxsize_mb): break
+        clean_cache_size(cpath, name, timeout_sec)
+        timeout_sec = timeout_sec - 3600
     pass
 
 
@@ -374,6 +384,7 @@ class MediaExtm3u8(object):
                 lines = fp.readlines()
                 fp.close()
                 if self._parse(lines, 0, False):
+                    self.fpath = path
                     return True
             except:
                 pass
@@ -409,9 +420,9 @@ class MediaExtm3u8(object):
         if not self.fp: return False
         if self.is_end: return False
         if not self.is_begin:
-            self._add_begin(self.fp, self.duration)
+            self.fp.write(self._get_begin(self.duration))
             self.is_begin = True
-        self._add_one(self.fp, name, seconds)
+        self.fp.write(self._get_one(name, seconds))
         self.fp.flush()
     def next_name(self):
         self.last_seq += 1
@@ -424,6 +435,11 @@ class MediaExtm3u8(object):
         return (self.last_seq + 1) * self.duration - 1
     def is_complete(self):
         return self.curr_dur() >= self.media_dur
+    def index_path(self):
+        fname = None
+        if self.fpath:
+            fname = os.path.join(self.fpath, "index.m3u8")
+        return fname
 
     def close(self):
         if self.fp:
@@ -431,9 +447,33 @@ class MediaExtm3u8(object):
             self.fp = None
     def closeEnd(self):
         if self.fp:
-            self._add_end(self.fp)
+            self.fp.write(self._get_end())
             self.is_end = True
         self.close()
+
+    def fakeLiveContent(self):
+        try:
+            fp = open(self.index_path(), "r")
+            fdata = fp.read()
+            fp.close()
+        except:
+            return None
+        return fdata.replace("#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-PLAYLIST-TYPE:EVENT")
+    def fakeVlcContent(self, seconds, totalDuration):
+        maxSeq = int(totalDuration/seconds + 0.9)
+        logging.info(["fakeVlc, total-dur", totalDuration, maxSeq])
+        if maxSeq > 0:
+            return self.fakeVodContent(seconds, maxSeq)
+        else:
+            return self.fakeLiveContent()
+    def fakeVodContent(self, seconds, maxSeq=3):
+        lines = []
+        lines.append(self._get_begin(seconds))
+        for i in range(maxSeq):
+            name = "hls_segment_%06d.ts" % i
+            lines.append(self._get_one(name, seconds))
+        return "".join(lines)
+
     def _parse(self, lines, seconds, strongCheck=True):
         last_pos = 0
         last_seq = -1
@@ -483,28 +523,33 @@ class MediaExtm3u8(object):
         logging.info("extm3u, last ended and nop again!")
         self.probe_pos = 0
         return True
-    def _add_begin(self, fp, seconds):
-        fp.write("#EXTM3U\n")
-        fp.write("#EXT-X-VERSION:6\n")
-        fp.write("#EXT-X-ALLOW-CACHE:NO\n")
-        fp.write("#EXT-X-MEDIA-SEQUENCE:0\n")
-        fp.write("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
-        fp.write("#EXT-X-PLAYLIST-TYPE:VOD\n")
-        fp.write("#EXT-X-START:TIME-OFFSET=0\n")
-        fp.write("\n")
-    def _add_one(self, fp, segment, seconds):
+    def _get_begin(self, seconds):
+        lines = []
+        lines.append("#EXTM3U\n")
+        lines.append("#EXT-X-VERSION:6\n")
+        lines.append("#EXT-X-ALLOW-CACHE:NO\n")
+        lines.append("#EXT-X-MEDIA-SEQUENCE:0\n")
+        lines.append("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
+        lines.append("#EXT-X-PLAYLIST-TYPE:VOD\n")
+        lines.append("#EXT-X-START:TIME-OFFSET=0\n")
+        lines.append("\n")
+        return "".join(lines)
+    def _get_one(self, segment, seconds):
+        lines = []
         if type(seconds) == float:
-            fp.write("#EXTINF:%.2f,\n" % seconds)
+            lines.append("#EXTINF:%.2f,\n" % seconds)
         else:
-            fp.write("#EXTINF:%d,\n" % int(seconds))
-        fp.write("%s\n" % segment)
-    def _add_end(self, fp):
-        fp.write("#EXT-X-ENDLIST")
+            lines.append("#EXTINF:%d,\n" % int(seconds))
+        lines.append("%s\n" % segment)
+        return "".join(lines)
+    def _get_end(self):
+        return "#EXT-X-ENDLIST"
 
 
 #========= processing media files
 class MediaInfo(object):
     def __init__(self):
+        self.minfo_time = nowtime_sec()
         self.infile = ''
         self.info = {}
 
@@ -908,9 +953,14 @@ class HlsService:
 
         # tmp destination for transcoder
         fdst_tmp = os.path.join(fdst, "cached");
-        if os.path.exists(fdst_tmp):
-            shutil.rmtree(fdst_tmp)
-        os.makedirs(fdst_tmp, exist_ok=True)
+        try:
+            if os.path.isdir(fdst_tmp):
+                shutil.rmtree(fdst_tmp)
+            os.makedirs(fdst_tmp, exist_ok=True)
+        except: pass
+        if not os.path.isdir(fdst_tmp):
+            logging.warning(["hls-srv, create cache failed", fdst_tmp])
+            return False
         mmon = MediaMonitor("playlist.m3u8")
         mmon.start(fdst_tmp, self.on_mon_changed)
         self.monitor = mmon
@@ -952,7 +1002,9 @@ class HlsService:
                 srcf = os.path.join(path, line.strip())
                 name, dstf = extm.next_name()
                 logging.info("hls-srv, changed new-segment: <%s> from %s", name, srcf)
-                movefile(srcf, dstf)
+                try:
+                    movefile(srcf, dstf)
+                except: pass
                 extm.write(name, seconds)
             else:
                 logging.warning("hls-srv, changed invalid new-segment: %s", line)
@@ -1131,36 +1183,34 @@ def createHls(index):
 
 class HlsCenter:
     def __init__(self, dstPath, count):
+        self.mutex = threading.Lock()
         self.dstPath = dstPath
         self.count = count
         self.services = []
         self.ploop = None
+        self.minfos = {}
         pass
 
-    def _cache_checking(self, p):
-        timeout = 7200
-        last_time = nowtime_sec()
+    def _checking(self, p):
         while True:
             try:
-                ret = p.poll(600)
+                ret = p.poll(1800)
             except:
                 ret = True
             if ret:
                 logging.warning("cache, pipe error or closed")
                 break
             try:
-                now = nowtime_sec()
-                if now >= last_time + timeout:
-                    #TODO: thread security
-                    check_cache_timeout(self.dstPath, "index.m3u8")
-                    last_time = now
+                #TODO: thread security
+                check_cache_timeout(self.dstPath, "index.m3u8", 1024*20, 3600*24)
+                self.clear_minfo(3600*4)
             except:
                 pass
         p.close()
         pass
     def _start_loop(self):
         p1, p2 = multiprocessing.Pipe(True)
-        thread.start_new_thread(self._cache_checking, (p1, ))
+        thread.start_new_thread(self._checking, (p1, ))
         self.ploop = p2
     def _stop_loop(self):
         if self.ploop:
@@ -1213,6 +1263,27 @@ class HlsCenter:
             return True
         return False
 
+    def get_minfo(self, name):
+        self.mutex.acquire()
+        info = self.minfos.get(name)
+        self.mutex.release()
+        return info
+    def set_minfo(self, name, minfo):
+        self.mutex.acquire()
+        self.minfos[name] = minfo
+        self.mutex.release()
+    def clear_minfo(self, sec=100):
+        self.mutex.acquire()
+        now = nowtime_sec()
+        timeouts = []
+        for k,v in self.minfos.items():
+            if now >= v.minfo_time + sec:
+                timeouts.append(k)
+        for k in timeouts:
+            self.minfos.pop(k)
+        self.mutex.release()
+        pass
+
 
 #======== parent-process web
 class MyHTTPRequestHandler:
@@ -1261,7 +1332,10 @@ class MyHTTPRequestHandler:
     # step1: check self.workdir + source.mkv
     # step2: check self.hlsdir + source.mkv/index.m3u8
     # step3: check self.hlsdir + source.mkv/segment.ts
-    async def check_hls(self, uri, headers):
+    async def check_hls(self, request, uri):
+        headers = request.headers
+        agent = headers.get("User-Agent")
+        raddr = self.get_raddr(request)
         prefix = "%s/" % self.hlskey
         opath = self.translate_path(uri)
 
@@ -1272,7 +1346,7 @@ class MyHTTPRequestHandler:
         cpath = os.path.join(".", path)
         fpath = os.path.join(self.workdir, path)
         bname = os.path.basename(path)
-        logging.info(["webhandler, begin:", uri, path, bname])
+        logging.info(["webhandler, begin:", uri, raddr, agent])
 
         ## check curr file/dir
         if os.path.isdir(cpath):
@@ -1315,32 +1389,22 @@ class MyHTTPRequestHandler:
             return web.HTTPNotFound(reason="Source file not found")
         user_fpath = os.path.join(self.hlsdir, path)
         message = HlsMessage("prepare", source, src_fpath, dst_fpath)
-        logging.info(["webhandler, hls source:", source, bname, user_fpath])
+        #logging.info(["webhandler, hls source:", source, bname, user_fpath])
 
         # send direct if exist
         hextm = MediaExtm3u8()
         hextm.parse(dst_fpath)
         if hextm.is_end:
-            if bname == "index.m3u8" and os.path.exists(user_fpath):
-                logging.info(["webhandler, m3u8 transcode complete:", path])
-                try: touchpath(user_fpath)
-                except: pass
-            # TODO: how to process index.m3u8 complete but segment not exists??
+            try: touchpath(hextm.index_path())
+            except: pass
+            # TODO: how to process playlist complete but segment not exists??
             return self.send_static(user_fpath, headers)
 
-        ## check segment directly
-        seg_fpath = user_fpath
-        if bname != "index.m3u8":
-            bret = self.hlscenter.post_service(message)
-            if not os.path.isfile(seg_fpath) and not bret:
-                logging.warning(["webhandler, segment prepare failed:", path])
-                return web.HTTPTooManyRequests()
-            await asyncio.sleep(1)
-            return self.send_static(seg_fpath, headers)
-
-        ## check m3u8
-        m3u8_fpath = user_fpath
-        if not os.path.exists(m3u8_fpath):
+        ## check media info
+        #self.hlscenter.clear_minfo()
+        minfo = self.hlscenter.get_minfo(source)
+        if not minfo:
+            logging.info(["webhandler, first to parse media info...", path])
             minfo = MediaInfo()
             if not minfo.parse(src_fpath):
                 logging.warning(["webhandler, m3u8 unsupport media:", path])
@@ -1349,37 +1413,71 @@ class MyHTTPRequestHandler:
                 mpath = os.path.join("/%s" % prefix, source)
                 logging.info(["webhandler, m3u8 redirect to media:", mpath])
                 return web.HTTPTemporaryRedirect(location=mpath)
+            self.hlscenter.set_minfo(source, minfo)
 
-            bret = self.hlscenter.post_service(message)
-            if not bret:
-                logging.warning(["webhandler, m3u8 prepare1 failed:", path])
+        ## post to service
+        bpost = self.hlscenter.post_service(message)
+        logging.info(["webhandler, prepare:", bpost, path, hextm.curr_seq()])
+
+        ## check segment directly
+        seg_fpath = user_fpath
+        if bname != "index.m3u8":
+            if not os.path.isfile(seg_fpath) and not bpost:
+                logging.warning(["webhandler, segment prepare failed:", path])
                 return web.HTTPTooManyRequests()
-            logging.info(["webhandler, m3u8 prepare1 media:", path])
-            await asyncio.sleep(3)
+            stime = 1
+            if not os.path.isfile(seg_fpath) and agent.find("VLC/") != -1:
+                stime = 2
+            await asyncio.sleep(stime)
+            return self.send_static(seg_fpath, headers)
+
+        ## check m3u8 at the first time
+        m3u8_fpath = user_fpath
+        if not os.path.exists(m3u8_fpath):
+            if not bpost:
+                logging.warning(["webhandler, m3u8 prepare failed:", path])
+                return web.HTTPTooManyRequests()
             mpath = os.path.join("/%s" % prefix, path)
-            logging.info(["webhandler, m3u8 redirect to m3u8:", mpath])
+            logging.info(["webhandler, m3u8 redirect to another:", mpath])
+            await asyncio.sleep(3)
             return web.HTTPTemporaryRedirect(location=mpath)
 
-        # prepare2
-        bret = self.hlscenter.post_service(message)
-        logging.info(["webhandler, m3u8 prepare2:", bret, path, hextm.curr_seq()])
-        if bret:
+        # delay m3u8 if in transcoding
+        if bpost:
             delay = 1
             if hextm.curr_seq() < 5: delay = 2
             await asyncio.sleep(delay)
+
+        # fake m3u8 if possible
+        body = None
+        if agent.find("VLC/") != -1:
+            body = hextm.fakeVlcContent(message.segtime, minfo.duration())
+        elif hextm.curr_seq() < 3:
+            body = hextm.fakeVodContent(message.segtime)
+        if body:
+            headers2 = {}
+            headers2["Content-type"] = 'application/x-mpegURL'
+            return web.Response(body=body, headers=headers2, status=200)
         return self.send_static(m3u8_fpath, headers)
 
+
+    def get_raddr(self, request):
+        raddr = None
+        sock = request.get_extra_info('socket')
+        if sock:
+            raddr = sock.getpeername()
+            raddr = "%s:%s" % (raddr[0], raddr[1])
+        return raddr
 
     async def do_File(self, request):
         try:
             #logging.info(["do_File begin", request.url])
-            headers = request.headers
             uri = request.match_info["uri"]
         except Exception as e:
             logging.warning(["do_File error:", e])
             return web.HTTPBadRequest()
         else:
-            resp = await self.check_hls(uri, headers)
+            resp = await self.check_hls(request, uri)
             return resp
 
     def send_static(self, fpath, headers):
@@ -1532,7 +1630,7 @@ async def run_web_server(handler):
     app.add_routes([
         web.get(r'/{uri:.*}', handler.do_File),
         ])
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, addr, port)
     await site.start()
@@ -1560,6 +1658,7 @@ def do_test():
     set_log_file(None)
     logging.info("=======testing begin========")
     #check_cache_timeout("/tmp/cached", "index.m3u8")
+    #check_cache_timeout("./samples/cached", "index.m3u8", 10, 100)
     thread.start_new_thread(do_test_coder, ())
     time.sleep(300)
     pass
