@@ -39,250 +39,423 @@ try:
     from gi.repository import GstPbutils
 except:
     pass
-
-
-#======== common tools
-def pyver():
-    major = sys.version_info[0]
-    minor = sys.version_info[1]
-    return major * 10 + minor
-
-def nowtime(): #ms
-    return int(time.time()*1000)
-
-def nowtime_sec(): #sec
-    return int(time.time())
-
-def copyfile(source, dest):
-    shutil.copyfile(source, dest)
-
-def movefile(source, dest):
-    shutil.move(source, dest)
-
-def touchpath(path):
-    tpath = pathlib.Path(path)
-    tpath.touch()
-
-def tonumber(val, default=None):
-    try:
-        ret = default
-        ret = int(val)
-    except: 
-        try: ret = float(val)
-        except: pass
-    return ret
-
-log_path = "/tmp"
-def set_log_path(path):
-    if not path:
-        log_path = "/tmp"
-        return
-    try:
-        dpath = os.path.dirname(path)
-        if dpath and os.path.exists(dpath):
-            os.makedirs(path, exist_ok=True)
-            touchpath(path)
-            log_path = path
-            print("[-] set log path: ", path)
-            return
-    except:
-        pass
-    print("[-] fail to set log path:", path)
-
-def set_log_file(fname):
-    if fname and log_path:
-        fname = os.path.join(log_path, fname)
-    formatter = '%(asctime)s - [%(levelname)s] - %(message)s'
-    datefmt = '%m/%d/%Y %H:%M:%S'
-    if pyver() >= 39:
-        logging.basicConfig(filename=fname, encoding='utf-8', format=formatter, datefmt=datefmt, level=logging.INFO)
-    else:
-        logging.basicConfig(filename=fname, format=formatter, datefmt=datefmt, level=logging.INFO)
-    pass
-
-def check_cache_size(cpath, maxMB):
-    shbin = "M=$(du -sm \"%s\" 2>/dev/null | awk '{print $1}' 2>/dev/null); test $M -gt %s 2>/dev/null" % (cpath, maxMB)
-    ret = os.system(shbin)
-    return (ret == 0)
-
-def clean_cache_size(cpath, name, tosec):
-    logging.info(["cache-check", cpath, tosec])
-    now = nowtime_sec()
-    items = sorted(pathlib.Path(cpath).glob('**/%s' % name))
-    for item in items:
-        stat = pathlib.Path(item).stat()
-        #logging.info([stat, now, tosec])
-        if now >= stat.st_atime + tosec and now >= stat.st_mtime + tosec:
-            dname = os.path.dirname(item)
-            logging.info(["cache-check, remove", dname])
-            shutil.rmtree(dname)
-            pass
-    pass
-
-def check_cache_timeout(cpath, name, maxsize_mb=1024*10, timeout_sec=3600*4):
-    if cpath.find("cache") == -1: return
-    while timeout_sec >= 3600:
-        if not check_cache_size(cpath, maxsize_mb): break
-        clean_cache_size(cpath, name, timeout_sec)
-        timeout_sec = timeout_sec - 3600
-    pass
-
-
-#======== gstreamer service
 Gst.init(None)
 
-def gst_make_elem(name, props={}, alias=None):
-    if not name: return None
-    elem = Gst.ElementFactory.make(name, alias)
-    if elem and props:
-        for k,v in props.items(): elem.set_property(k, v)
-    return elem
-def gst_add_elems(pipeline, elems=[]):
-    for e in elems:
-        if e: pipeline.add(e)
-def gst_link_elems(elems, dst=None):
-    last = None
-    for e in elems:
-        if last: last.link(e)
-        last = e
-    if last and dst: last.link(dst)
-def gst_set_playing(elems=[]):
-    for e in elems:
-        e.set_state(Gst.State.PLAYING)
-def gst_make_filter(fmt): # "video/x-raw", "audio/x-raw"
-    caps = Gst.Caps.from_string(fmt)
-    return gst_make_elem("capsfilter", {"caps": caps})
-def gst_check_elem(name):
-    if gst_make_elem(name): return name
-    return None
 
-def gst_ts_mux_profile():
-    return "video/mpegts,systemstream=true,packetsize=188"
-def gst_aac_enc_profile(kbps):
-    return "audio/mpeg,mpegversion=4,bitrate=%s" % (kbps*1024)
-def gst_h264_enc_profile(kbps):
-    return "video/x-h264,stream-format=byte-stream,bitrate=%s" % (kbps*1024)
-def gst_audio_props(name, kbps):
-    bps = kbps * 1024
-    props = {
-        "faac": {"bitrate": bps},
-        "voaacenc": {"bitrate": bps},
-        "avenc_aac": {"bitrate": bps},
+#===== common utils
+class CUtil:
+    user_agent = "hlsvod/1.0"
+    log_path = "/tmp"
+    support_exts = {
+        '.m3u8': True,
+        '.ts':   True,
     }
-    for k, v in props.items():
-        if name.find(k) == 0: return v
-    return None
-def gst_video_props(name, kbps, width=0, height=0):
-    bps = kbps * 1024
-    props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main", "gop":120}
-    if width > 0 and height > 0:
-        props1["width"] = width
-        props1["height"] = height
-    props2 = {"pass":"pass1", "bitrate":bps, "profile":"main"}
-    props3 = {"pass":"pass1", "bitrate":kbps}
-    props = {
-        "mpph264enc": props1,
-        "avenc_h264_videotoolbox": props2,
-        "avenc_h264": props2,
-        "x264enc": props3
+    extensions_map = {
+        '.gz': 'application/gzip',
+        '.Z': 'application/octet-stream',
+        '.bz2': 'application/x-bzip2',
+        '.xz': 'application/x-xz',
+        '.md': 'text/markdown',
+        '.mp4': 'video/mp4',
+        '.mov': 'video/quicktime',
+        #'.ts': 'video/mpegts',
+        '.ts': 'video/MP2T',
+        #'.m3u8': 'application/x-hls',
+        '.m3u8': 'application/x-mpegURL',
+        '.sh': "text/html",
     }
-    for k, v in props.items():
-        if name.find(k) == 0: return v
-    return None
-def gst_common_queue(sinkdelay=0, srcdelay=0):
-    elem = "queue"
-    if (sinkdelay > 0 or srcdelay > 0) and gst_make_elem("queuex"):
-        elem = "queuex"
+
+    @classmethod
+    def pyver(cls):
+        major = sys.version_info[0]
+        minor = sys.version_info[1]
+        return major * 10 + minor
+
+    @classmethod
+    def tonumber(cls, val, default=None):
+        try:
+            ret = default
+            ret = int(val)
+        except: 
+            try: ret = float(val)
+            except: pass
+        return ret
+
+    @classmethod
+    def nowtime(cls): #ms
+        return int(time.time()*1000)
+
+    @classmethod
+    def nowtime_sec(cls): #sec
+        return int(time.time())
+
+    @classmethod
+    def datetime_string(cls, timestamp=None):
+        if timestamp is None: timestamp = time.time()
+        return email.utils.formatdate(timestamp, usegmt=True)
+
+    @classmethod
+    def touchfile(cls, path):
+        tpath = pathlib.Path(path)
+        tpath.touch()
+
+    @classmethod
+    def parse_dirname(cls, path):
+        fpath = path
+        if path.endswith('/'): fpath = path[:len(path)-1]
+        return os.path.dirname(fpath)
+
+    @classmethod
+    def parse_mtime(cls, fname):
+        try:
+            mtime = 0
+            f = open(fname, 'rb')
+            try:
+                fs = os.fstat(f.fileno())
+                mtime = fs.st_mtime
+            except:
+                mtime = -2
+            f.close()
+        except:
+            mtime = -1
+        return mtime
+
+    @classmethod
+    def translate_path(cls, uri):
+        # abandon query parameters
+        uri = uri.split('?',1)[0]
+        uri = uri.split('#',1)[0]
+        # Don't forget explicit trailing slash when normalizing. Issue17324
+        trailing_slash = uri.rstrip().endswith('/')
+        try:
+            uri = urllib.parse.unquote(uri, errors='surrogatepass')
+        except UnicodeDecodeError:
+            uri = urllib.parse.unquote(uri)
+        path = posixpath.normpath(uri)
+        words = path.split('/')
+        words = filter(None, words)
+        path = ""
+        for word in words:
+            if os.path.dirname(word) or word in (os.curdir, os.pardir):
+                # Ignore components that are not a simple file/directory name
+                continue
+            path = os.path.join(path, word)
+        if trailing_slash: path += '/'
+        return path
+
+    @classmethod
+    def guess_type(cls, fpath):
+        base, ext = posixpath.splitext(fpath)
+        if ext in cls.extensions_map:
+            return cls.extensions_map[ext]
+        ext = ext.lower()
+        if ext in cls.extensions_map:
+            return cls.extensions_map[ext]
+        guess, _ = mimetypes.guess_type(fpath)
+        if guess: return guess
+        return 'application/octet-stream'
+
+    @classmethod
+    def set_log_path(cls, path):
+        if not path:
+            cls.log_path = "/tmp"
+            return
+        try:
+            dpath = os.path.dirname(path)
+            if dpath and os.path.exists(dpath):
+                os.makedirs(path, exist_ok=True)
+                cls.touchfile(path)
+                cls.log_path = path
+                print("[-] set log path: ", path)
+                return
+        except:
+            pass
+        print("[-] fail to set log path:", path)
+
+    @classmethod
+    def set_log_file(cls, fname):
+        if fname:
+            fname = os.path.join(cls.log_path, fname)
+        logfmt = '%(asctime)s - [%(levelname)s] - %(message)s'
+        datefmt = '%m/%d/%Y %H:%M:%S'
+        if cls.pyver() >= 39:
+            logging.basicConfig(filename=fname, encoding='utf-8', format=logfmt, datefmt=datefmt, level=logging.INFO)
+        else:
+            logging.basicConfig(filename=fname, format=logfmt, datefmt=datefmt, level=logging.INFO)
+        pass
+
+
+#===== cache checking
+class Cache:
+    @classmethod
+    def check_size(cls, cpath, maxMB):
+        shbin = "M=$(du -sm \"%s\" 2>/dev/null | awk '{print $1}' 2>/dev/null); test $M -gt %s 2>/dev/null" % (cpath, maxMB)
+        ret = os.system(shbin)
+        return (ret == 0)
+
+    @classmethod
+    def clean_size(cls, cpath, name, tosec):
+        logging.info(["cache-check", cpath, name, tosec])
+        now = CUtil.nowtime_sec()
+        items = sorted(pathlib.Path(cpath).glob('**/%s' % name))
+        for item in items:
+            stat = pathlib.Path(item).stat()
+            #logging.info([stat, now, tosec])
+            if now >= stat.st_atime + tosec and now >= stat.st_mtime + tosec:
+                dname = os.path.dirname(item)
+                logging.info(["cache-check, remove", dname])
+                shutil.rmtree(dname)
+            pass
+        pass
+
+    @classmethod
+    def check_timeout(cls, cpath, name, maxsize_mb=1024*10, timeout_sec=3600*4):
+        if cpath.find("cache") == -1: return
+        while timeout_sec >= 3600:
+            if not cls.check_size(cpath, maxsize_mb):
+                break
+            cls.clean_size(cpath, name, timeout_sec)
+            timeout_sec = timeout_sec - 3600
+        pass
+
+
+#===== gstreamer tools
+class CGst:
+    @classmethod
+    def set_props(cls, elem, props={}):
+        if elem and props:
+            for k,v in props.items(): elem.set_property(k, v)
+
+    @classmethod
+    def make_elem(cls, name, props={}, alias=None):
+        if not name: return None
+        elem = Gst.ElementFactory.make(name, alias)
+        cls.set_props(elem, props)
+        return elem
+
+    @classmethod
+    def add_elems(cls, pipeline, elems=[]):
+        for e in elems:
+            if e: pipeline.add(e)
+
+    @classmethod
+    def link_elems(cls, elems, dst=None):
+        last = None
+        for e in elems:
+            if last: last.link(e)
+            last = e
+        if last and dst: last.link(dst)
+
+    @classmethod
+    def set_playing(cls, elems=[]):
+        for e in elems:
+            if e: e.set_state(Gst.State.PLAYING)
+
+    @classmethod
+    def make_filter(cls, fmt): # "video/x-raw", "audio/x-raw"
+        caps = Gst.Caps.from_string(fmt)
+        return cls.make_elem("capsfilter", {"caps": caps})
+
+    @classmethod
+    def check_elem_name(cls, name):
+        if cls.make_elem(name): return name
+        return None
+
+    @classmethod
+    def make_elem_name(cls, name, props={}):
+        if len(props) == 0: return name
+        items = []
+        for k,v in props.items():
+            if type(v) == int: items.append("%s=%s" % (k, v))
+            else: items.append("%s=\"%s\"" % (k, v))
+        return "%s %s" % (name, " ".join(items))
+
+    @classmethod
+    def make_queue_name(cls, sinkdelay=0, srcdelay=0):
+        if sinkdelay == 0 and srcdelay == 0: return "queue"
+        name = cls.check_elem_name("queuex")
+        if not name: return "queue"
+        props = {}
         if sinkdelay > 0:
-            elem = "%s min-sink-interval=%d" % (elem, sinkdelay)
+            props["min-sink-interval"] = sinkdelay
         if srcdelay > 0:
-            elem = "%s min-src-interval=%d" % (elem, srcdelay)
-    return elem
+            props["min-src-interval"] = srcdelay
+        return cls.make_elem_name(name, props)
 
-def gst_parse_props(line, key):
-    if line.find(key) == -1: return {}
-    ret = re.search("%s ([\w/-]+)[,]*(.*)" % key, line)
-    if not ret or len(ret.groups()) == 0: return {}
-    props = {}
-    props["detail"] = line
-    props["type"] = ret.groups()[0]
-    props["more"] = {}
-    if len(ret.groups()) >= 2:
-        for item in ret.groups()[1].split(", "):
-            pair = item.strip().split("=")
-            if len(pair) == 2: props["more"][pair[0]] = pair[1]
-    return props
-def gst_discover_info(fname):
-    info = {}
-    uri = urllib.parse.urljoin("file://", os.path.abspath(fname))
-    shbin = "gst-discoverer-1.0 --use-cache -v \"%s\"" % uri
-    lines = os.popen(shbin)
-    for line in lines:
-        if line.find("Duration: ") >= 0:
-            pos = line.find("Duration: ")
-            items = line[pos+10:].split(".")[0].split(":")
-            if len(items) == 3:
-                info["duration"] = int(items[0])*3600 + int(items[1])*60 + int(items[2])
-        elif line.find("container:") >= 0:
-            info["mux"] = gst_parse_props(line, "container:")
-        elif line.find("unknown:") >= 0: 
-            info["mux"] = gst_parse_props(line, "unknown:")
-        elif line.find("audio:") >= 0:
-            info["audio"] = gst_parse_props(line, "audio:")
-        elif line.find("video:") >= 0:
-            info["video"] = gst_parse_props(line, "video:")
-    return info
-def gst_parse_value(item):
-    if not item: return None
-    ret = re.search("\((.*)\)(.*)", item)
-    if not ret or len(ret.groups()) <= 1: return None
-    stype, sval = ret.groups()[0:2]
-    if stype == "fraction":
-        ival = 0
-        for ch in sval:
-            if ch >= '0' and ch <= '9': ival = ival * 10 + int(ch)
-            else: break
-        return ival
-    elif stype == "int":
-        return int(sval)
-    elif stype == "boolean":
-        return sval == "true"
-    return sval
+    @classmethod
+    def ts_mux_profile(cls):
+        return "video/mpegts,systemstream=true,packetsize=188"
 
-def gst_video_size(width, height, fps=24):
-    if width > 1920:
-        height = int(height * 1920 / width / 4) * 4
-        width = 1920
-    if height > 1080:
-        width = int(width * 1080 / height / 4) * 4
-        height = 1080
-    kbps = [300, 600]
-    pixels = width * height
-    if pixels >= 1920*1080: kbps = [1500, 2500]
-    elif pixels >= 1280*720: kbps = [800, 1800]
-    elif pixels >= 960*540: kbps = [600, 1000]
-    info = []
-    info.append(int(kbps[0] * fps / 24))
-    info.append(int(kbps[1] * fps / 24))
-    info.append(width)
-    info.append(height)
-    return info
+    @classmethod
+    def aac_enc_profile(cls, kbps):
+        return "audio/mpeg,mpegversion=4,bitrate=%s" % (kbps*1024)
 
-def hls_parse_prop(line, default=None):
-    pos1 = line.find(":")
-    if pos1 < 0: return default
-    pos2 = line.find(",", pos1+1)
-    if pos2 >= 0:
-        val = line[pos1+1:pos2]
-    else:
-        val = line[pos1+1:]
-    return tonumber(val, default)
-def hls_parse_segment(line, default=None):
-    try:
-        result = re.search(".*_segment_(\d+).ts", line)
-        return int(result.groups()[0])
-    except:
+    @classmethod
+    def h264_enc_profile(cls, kbps):
+        return "video/x-h264,stream-format=byte-stream,bitrate=%s" % (kbps*1024)
+
+    @classmethod
+    def audio_props(cls, name, kbps):
+        bps = kbps * 1024
+        props = {
+            "faac": {"bitrate": bps},
+            "voaacenc": {"bitrate": bps},
+            "avenc_aac": {"bitrate": bps},
+        }
+        for k, v in props.items():
+            if name.find(k) == 0: return v
+        return None
+
+    @classmethod
+    def video_props(cls, name, kbps, width=0, height=0):
+        bps = kbps * 1024
+        props1 = {"rc-mode":"vbr", "bps":bps, "profile":"main", "gop":120}
+        if width > 0 and height > 0:
+            props1["width"] = width
+            props1["height"] = height
+        props2 = {"pass":"pass1", "bitrate":bps, "profile":"main"}
+        props3 = {"pass":"pass1", "bitrate":kbps}
+        props = {
+            "mpph264enc": props1,
+            "avenc_h264_videotoolbox": props2,
+            "avenc_h264": props2,
+            "x264enc": props3
+        }
+        for k, v in props.items():
+            if name.find(k) == 0: return v
+        return None
+
+    @classmethod
+    def parse_discover_props(cls, line, key):
+        if line.find(key) == -1: return {}
+        ret = re.search("%s ([\w/-]+)[,]*(.*)" % key, line)
+        if not ret or len(ret.groups()) == 0: return {}
+        props = {}
+        props["detail"] = line
+        props["type"] = ret.groups()[0]
+        props["more"] = {}
+        if len(ret.groups()) >= 2:
+            for item in ret.groups()[1].split(", "):
+                pair = item.strip().split("=")
+                if len(pair) == 2: props["more"][pair[0]] = pair[1]
+        return props
+
+    @classmethod
+    def discover_info(cls, fname):
+        info = {}
+        uri = urllib.parse.urljoin("file://", os.path.abspath(fname))
+        shbin = "gst-discoverer-1.0 --use-cache -v \"%s\"" % uri
+        lines = os.popen(shbin)
+        for line in lines:
+            if line.find("Duration: ") >= 0:
+                pos = line.find("Duration: ")
+                items = line[pos+10:].split(".")[0].split(":")
+                if len(items) == 3:
+                    info["duration"] = int(items[0])*3600 + int(items[1])*60 + int(items[2])
+            elif line.find("container:") >= 0:
+                info["mux"] = cls.parse_discover_props(line, "container:")
+            elif line.find("unknown:") >= 0: 
+                info["mux"] = cls.parse_discover_props(line, "unknown:")
+            elif line.find("audio:") >= 0:
+                info["audio"] = cls.parse_discover_props(line, "audio:")
+            elif line.find("video:") >= 0:
+                info["video"] = cls.parse_discover_props(line, "video:")
+        return info
+
+    @classmethod
+    def parse_discover_value(cls, item):
+        if not item: return None
+        ret = re.search("\((.*)\)(.*)", item)
+        if not ret or len(ret.groups()) <= 1: return None
+        stype, sval = ret.groups()[0:2]
+        if stype == "fraction":
+            ival = 0
+            for ch in sval:
+                if ch >= '0' and ch <= '9': ival = ival * 10 + int(ch)
+                else: break
+            return ival
+        elif stype == "int":
+            return int(sval)
+        elif stype == "boolean":
+            return sval == "true"
+        return sval
+
+
+#===== hls tools
+class CHls:
+    # @return [min_kbps, max_kbps, width, height]
+    @classmethod
+    def correct_video_size(cls, width, height, fps=24):
+        if width > 1920:
+            height = int(height * 1920 / width / 4) * 4
+            width = 1920
+        if height > 1080:
+            width = int(width * 1080 / height / 4) * 4
+            height = 1080
+        if fps <= 0: fps = 20
+        elif fps >= 30: fps = 30
+        kbps = [300, 600]
+        pixels = width * height
+        if pixels >= 1920*1080: kbps = [1500, 2500]
+        elif pixels >= 1280*720: kbps = [800, 1800]
+        elif pixels >= 960*540: kbps = [600, 1000]
+        info = []
+        info.append(int(kbps[0] * fps / 24))
+        info.append(int(kbps[1] * fps / 24))
+        info.append(width)
+        info.append(height)
+        return info
+
+    @classmethod
+    def parse_prop(cls, line, default=None):
+        pos1 = line.find(":")
+        if pos1 < 0: return default
+        pos2 = line.find(",", pos1+1)
+        if pos2 >= 0:
+            val = line[pos1+1:pos2]
+        else:
+            val = line[pos1+1:]
+        return CUtil.tonumber(val, default)
+
+    @classmethod
+    def parse_segment(cls, line, default=None):
+        try:
+            ret = re.search("hls_segment_(\d+).ts", line)
+            return int(ret.groups()[0])
+        except: pass
         return default
+
+    @classmethod
+    def segment_name(cls, seq=-1):
+        if seq == -1: return "hls_segment_%06d.ts"
+        return "hls_segment_%06d.ts" % seq
+
+    @classmethod
+    def get_begin(cls, seconds):
+        lines = []
+        lines.append("#EXTM3U\n")
+        lines.append("#EXT-X-VERSION:6\n")
+        lines.append("#EXT-X-ALLOW-CACHE:NO\n")
+        lines.append("#EXT-X-MEDIA-SEQUENCE:0\n")
+        lines.append("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
+        lines.append("#EXT-X-PLAYLIST-TYPE:VOD\n")
+        lines.append("#EXT-X-START:TIME-OFFSET=0\n")
+        lines.append("\n")
+        return "".join(lines)
+
+    @classmethod
+    def get_one(cls, segment, seconds):
+        lines = []
+        if type(seconds) == float:
+            lines.append("#EXTINF:%.2f,\n" % seconds)
+        else:
+            lines.append("#EXTINF:%d,\n" % int(seconds))
+        lines.append("%s\n" % segment)
+        return "".join(lines)
+
+    @classmethod
+    def get_end(cls):
+        return "#EXT-X-ENDLIST"
 
 
 #========== file monitor
@@ -363,18 +536,18 @@ class MediaExtm3u8(object):
         self.fp = None
         self.fpath = None
         self.last_seq = -1
-        self.duration = 0
+        self.sdur = 0 #segment seconds
         self.is_begin = False
         self.is_end = False
         self.probe_pos = 0
-        self.media_dur = 0
+        self.duration = 0 # total seconds
     def _init(self):
         self.last_seq = -1
-        self.duration = 0
+        self.sdur = 0
         self.is_begin = False
         self.is_end = False
         self.probe_pos = 0
-        self.media_dur = 0
+        self.duration = 0
     def parse(self, path):
         self._init()
         fname = os.path.join(path, "index.m3u8")
@@ -414,27 +587,27 @@ class MediaExtm3u8(object):
                 return False
         self.fp = fp
         self.fpath = path
-        self.duration = seconds
+        self.sdur = seconds
         return True
     def write(self, name, seconds):
         if not self.fp: return False
         if self.is_end: return False
         if not self.is_begin:
-            self.fp.write(self._get_begin(self.duration))
+            self.fp.write(CHls.get_begin(self.sdur))
             self.is_begin = True
-        self.fp.write(self._get_one(name, seconds))
+        self.fp.write(CHls.get_one(name, seconds))
         self.fp.flush()
     def next_name(self):
         self.last_seq += 1
-        name = "hls_segment_%06d.ts" % self.last_seq
+        name = CHls.segment_name(self.last_seq)
         return name, os.path.join(self.fpath, name)
     def curr_seq(self):
         return self.last_seq
     def curr_dur(self):
         if self.last_seq < 0: return 0
-        return (self.last_seq + 1) * self.duration - 1
+        return (self.last_seq + 1) * self.sdur - 1
     def is_complete(self):
-        return self.curr_dur() >= self.media_dur
+        return self.curr_dur() >= self.duration
     def index_path(self):
         fname = None
         if self.fpath:
@@ -447,7 +620,7 @@ class MediaExtm3u8(object):
             self.fp = None
     def closeEnd(self):
         if self.fp:
-            self.fp.write(self._get_end())
+            self.fp.write(CHls.get_end())
             self.is_end = True
         self.close()
 
@@ -459,19 +632,19 @@ class MediaExtm3u8(object):
         except:
             return None
         return fdata.replace("#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-PLAYLIST-TYPE:EVENT")
-    def fakeVlcContent(self, seconds, totalDuration):
-        maxSeq = int(totalDuration/seconds + 0.9)
-        logging.info(["fakeVlc, total-dur", totalDuration, maxSeq])
+    def fakeVlcContent(self, seconds, duration):
+        maxSeq = int(duration/seconds + 0.9)
+        logging.info(["fakeVlc, total-duration", duration, maxSeq])
         if maxSeq > 0:
             return self.fakeVodContent(seconds, maxSeq)
         else:
             return self.fakeLiveContent()
     def fakeVodContent(self, seconds, maxSeq=3):
         lines = []
-        lines.append(self._get_begin(seconds))
+        lines.append(CHls.get_begin(seconds))
         for i in range(maxSeq):
-            name = "hls_segment_%06d.ts" % i
-            lines.append(self._get_one(name, seconds))
+            name = CHls.segment_name(i)
+            lines.append(CHls.get_one(name, seconds))
         return "".join(lines)
 
     def _parse(self, lines, seconds, strongCheck=True):
@@ -484,16 +657,16 @@ class MediaExtm3u8(object):
             elif line.find("#EXT-X-ENDLIST") == 0:
                 self.is_end = True
             elif line.find("#EXT-X-TARGETDURATION:") == 0:
-                self.duration = hls_parse_prop(line, 0)
+                self.sdur = CHls.parse_prop(line, 0)
             elif line.find("#EXTINF:") == 0:
                 isSeg = True
-                last_pos += hls_parse_prop(line, 0)
+                last_pos += CHls.parse_prop(line, 0)
                 continue
             elif len(line.strip()) == 0 or line[0] == "#":
                 continue
             if isSeg:
                 isSeg = False
-                seq = hls_parse_segment(line, None)
+                seq = CHls.parse_segment(line, None)
                 if seq is None:
                     logging.warning("extm3u, invalid segment seq")
                     return False
@@ -509,8 +682,8 @@ class MediaExtm3u8(object):
         if not strongCheck:
             return True
 
-        if self.duration != seconds:
-            logging.warning("extm3u, different duration")
+        if self.sdur < seconds:
+            logging.warning("extm3u, different sdur")
             #return False
         if not self.is_end:
             if last_seq < 3:
@@ -523,33 +696,12 @@ class MediaExtm3u8(object):
         logging.info("extm3u, last ended and nop again!")
         self.probe_pos = 0
         return True
-    def _get_begin(self, seconds):
-        lines = []
-        lines.append("#EXTM3U\n")
-        lines.append("#EXT-X-VERSION:6\n")
-        lines.append("#EXT-X-ALLOW-CACHE:NO\n")
-        lines.append("#EXT-X-MEDIA-SEQUENCE:0\n")
-        lines.append("#EXT-X-TARGETDURATION:%d\n" % (seconds+1))
-        lines.append("#EXT-X-PLAYLIST-TYPE:VOD\n")
-        lines.append("#EXT-X-START:TIME-OFFSET=0\n")
-        lines.append("\n")
-        return "".join(lines)
-    def _get_one(self, segment, seconds):
-        lines = []
-        if type(seconds) == float:
-            lines.append("#EXTINF:%.2f,\n" % seconds)
-        else:
-            lines.append("#EXTINF:%d,\n" % int(seconds))
-        lines.append("%s\n" % segment)
-        return "".join(lines)
-    def _get_end(self):
-        return "#EXT-X-ENDLIST"
 
 
 #========= processing media files
 class MediaInfo(object):
     def __init__(self):
-        self.minfo_time = nowtime_sec()
+        self.minfo_time = CUtil.nowtime_sec()
         self.infile = ''
         self.info = {}
 
@@ -572,15 +724,15 @@ class MediaInfo(object):
     def frameRate(self):
         value = self.info.get("video", {}).get("more", {}).get("framerate", 0)
         if type(value) == int: return value
-        return gst_parse_value(value)
+        return CGst.parse_discover_value(value)
     def width(self):
         value = self.info.get("video", {}).get("more", {}).get("width", 0)
         if type(value) == int: return value
-        return gst_parse_value(value)
+        return CGst.parse_discover_value(value)
     def height(self):
         value = self.info.get("video", {}).get("more", {}).get("height", 0)
         if type(value) == int: return value
-        return gst_parse_value(value)
+        return CGst.parse_discover_value(value)
 
     def isWebDirectSupport(self):
         mux = self.muxType()
@@ -594,14 +746,14 @@ class MediaInfo(object):
         return False
 
     def parse(self, infile):
-        info = gst_discover_info(infile)
+        info = CGst.discover_info(infile)
         if not info:
             logging.warning("minfo, no info")
             return False
         self.infile = infile
         self.info = info
         if self.duration() == 0:
-            logging.warning("minfo, no duration")
+            logging.warning("minfo, no total-duration")
             return False
         if not self.videoType() and not self.audioType():
             logging.warning("minfo, no audio and video")
@@ -646,26 +798,22 @@ class Transcoder(object):
     def outdated(self):
         return self.working == -1
 
-    def do_hlsvod(self, infile, outpath, inpos, segtime):
-        logging.info("gst-coder, %s - %s, start: %s, segment-time: %d", infile, outpath, inpos, segtime)
+    def do_hlsvod(self, infile, outpath, inpos, sdur):
+        logging.info("gst-coder, %s - %s, start: %s, segment-time: %d", infile, outpath, inpos, sdur)
         # output
         outfile = os.path.join(outpath, "index.ts")
         playlist = os.path.join(outpath, "playlist.m3u8")
-        segment = os.path.join(outpath, "hls_segment_%06d.ts")
+        segment = os.path.join(outpath, CHls.segment_name())
         options = {
             "max-files": 1000000,
-            "target-duration": segtime,
+            "target-duration": sdur,
             "playlist-length": 0,
             "playlist-location": playlist,
             "location": segment,
         }
+        sink = CGst.make_elem_name("hlssink", options)
 
         self.start_pos = int(inpos)
-        sink = "hlssink"
-        for k,v in options.items():
-            if type(v) == int: sink = "%s %s=%s" % (sink, k, v)
-            else: sink = "%s %s=\"%s\"" % (sink, k, v)
-
         self.working = 1
         self.do_work(infile, 64, 1024, sink)
         self.working = -1
@@ -681,14 +829,14 @@ class Transcoder(object):
         vType = minfo.videoType()
         vSize = None
         if vType:
-            vSize = gst_video_size(minfo.width(), minfo.height(), minfo.frameRate())
+            vSize = CHls.correct_video_size(minfo.width(), minfo.height(), minfo.frameRate())
             if vkbps > vSize[1]: vkbps = vSize[1]
             elif vkbps < vSize[0]: vkbps = vSize[0]
         logging.info(["gst-coder, media-type:", mType, aType, vType, vkbps, vSize])
 
-        mux = gst_ts_mux_profile()
-        aac = gst_aac_enc_profile(akbps)
-        avc = gst_h264_enc_profile(vkbps)
+        mux = CGst.ts_mux_profile()
+        aac = CGst.aac_enc_profile(akbps)
+        avc = CGst.h264_enc_profile(vkbps)
         logging.info(["gst-coder, elems=", mux, avc, aac])
         profile = "%s:%s:%s" % (mux, avc, aac)
 
@@ -721,38 +869,39 @@ class Transcoder(object):
         parts2.append("%s name=fs" % sink)
 
         if vType:
-            queue = gst_common_queue(0, 0)
+            queue = CGst.make_queue_name(0, 0)
             parts2.append("psrc0. ! db0.")
             parts2.append("db0. ! video/x-raw ! %s ! eb.video_0" % queue)
         if aType:
-            queue = gst_common_queue(0, 0)
+            queue = CGst.make_queue_name(0, 0)
             parts2.append("psrc1. ! db1.")
             parts2.append("db1. ! audio/x-raw ! %s ! eb.audio_0" % queue)
 
-        queue = gst_common_queue(3000, 0)
+        queue = CGst.make_queue_name(3000, 0)
         parts2.append("eb. ! %s ! fs." % queue)
         sstr2 = " ".join(parts2)
         logging.info(["gst-coder, pipeline2:", sstr2])
         p2 = Gst.parse_launch(sstr2)
+        psrc0 = p2.get_by_name("psrc0")
+        psrc1 = p2.get_by_name("psrc1")
         eb = p2.get_by_name("eb")
         logging.info(["gst-coder, pipeline2 ret:", p2, eb])
+
+        # config encodebin
         if eb:
             logging.info(["gst-coder, eb count:", eb.get_children_count()])
             for i in range(eb.get_children_count()):
                 e = eb.get_child_by_index(i)
                 props = None
                 if aType:
-                    props = gst_audio_props(e.get_name(), akbps)
+                    props = CGst.audio_props(e.get_name(), akbps)
                 if not props and vSize:
-                    props = gst_video_props(e.get_name(), vkbps, vSize[2], vSize[3])
+                    props = CGst.video_props(e.get_name(), vkbps, vSize[2], vSize[3])
                 if props:
-                    for k, v in props.items():
-                        logging.info(["gst-coder, eb set-props:", e.get_name(), k, v])
-                        e.set_property(k, v)
+                    logging.info(["gst-coder, eb set-props:", e.get_name(), props])
+                    CGst.set_props(e, props)
                 else:
                     logging.info(["gst-coder, eb skip set-props:", e.get_name()])
-        psrc0 = p2.get_by_name("psrc0")
-        psrc1 = p2.get_by_name("psrc1")
 
         # connect p1 and p2
         #GObject.set(psrc, "proxysink", psink, NULL);
@@ -768,7 +917,7 @@ class Transcoder(object):
         p2.set_base_time(0)
 
         # set p1 as default pipeline
-        logging.info("gst-coder, set playing...")
+        logging.info("gst-coder, set playing..., start: %s", self.start_pos)
         self.pipeline = p1
         self.pipeline2 = p2
         p1.set_state(Gst.State.PLAYING)
@@ -856,7 +1005,7 @@ class Transcoder(object):
             value = -1
             ok, pos = pline.query_duration(Gst.Format.TIME)
             if ok: value = int(float(pos) / Gst.SECOND)
-            logging.info(["gst-coder, duration:", value])
+            logging.info(["gst-coder, total-duration:", value])
         pass
 
 
@@ -868,7 +1017,7 @@ class HlsMessage:
         self.fsrc = fsrc
         self.fdst = fdst
 
-        self.segtime = 10 #seconds
+        self.sdur = 10 #segment seconds
         self.quality = "default" #low/medium/high
         self.result = None
     def str(self):
@@ -897,10 +1046,10 @@ class HlsService:
             self.extm3u8 = None
         self.last_coder_time = 0
 
-    def _loop(self, coder, fsrc, fdst, fpos, segtime):
+    def _loop(self, coder, fsrc, fdst, fpos, sdur):
         try:
             logging.info("hls-srv, loop begin...")
-            coder.do_hlsvod(fsrc, fdst, fpos, segtime)
+            coder.do_hlsvod(fsrc, fdst, fpos, sdur)
         except Exception as e:
             logging.warning("hls-srv, loop error: %s", e)
         except:
@@ -920,7 +1069,7 @@ class HlsService:
 
     def is_coder_timeout(self):
         if self.last_coder_time != 0:
-            return nowtime() >= self.last_coder_time + self.timeout
+            return CUtil.nowtime() >= self.last_coder_time + self.timeout
         return False
 
     def stop_coder(self):
@@ -930,20 +1079,20 @@ class HlsService:
             coder.do_stop()
         self._reset()
 
-    def start_coder(self, source, fsrc, fdst, segtime):
+    def start_coder(self, source, fsrc, fdst, sdur):
         minfo = MediaInfo()
         if not minfo.parse(fsrc):
             return False
 
         # final destination
         extm = MediaExtm3u8()
-        if not extm.open(fdst, segtime):
+        if not extm.open(fdst, sdur):
             return False
         if extm.is_end:
             logging.info("hls-srv, coder had end and nop")
             extm.close()
             return False
-        extm.media_dur = minfo.duration()
+        extm.duration = minfo.duration()
         self.extm3u8 = extm
         self.source = source
 
@@ -965,11 +1114,11 @@ class HlsService:
         mmon.start(fdst_tmp, self.on_mon_changed)
         self.monitor = mmon
 
-        self.last_coder_time = nowtime()
+        self.last_coder_time = CUtil.nowtime()
         self.coder = Transcoder()
         fpos = extm.probe_pos
         logging.info("hls-srv, coder start, pos=%s", fpos)
-        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, segtime))
+        thread.start_new_thread(self._loop, (self.coder, fsrc, fdst_tmp, fpos, sdur))
         logging.info("hls-srv, coder end...")
 
     def on_mon_changed(self, path, lines):
@@ -982,17 +1131,18 @@ class HlsService:
         seconds = 0
         for line in lines:
             if line.find("#EXT-X-TARGETDURATION:") == 0:
-                #extm.duration = hls_parse_prop(line, 0)
+                #extm.sdur = CHls.parse_prop(line, 0)
                 continue
             elif line.find("#EXT-X-ENDLIST") == 0:
-                logging.info("hls-srv, changed with segment, dur: %d-%d", extm.curr_dur(), extm.media_dur)
+                logging.info("hls-srv, changed with segment, dur: %d-%d", extm.curr_dur(), extm.duration)
                 if extm.is_complete():
                     extm.closeEnd()
                 break
             elif line.find("#EXTINF:") == 0:
                 isSeg = True
-                seconds = hls_parse_prop(line, 0)
-                if seconds > extm.duration*10:
+                seconds = CHls.parse_prop(line, 0)
+                if seconds > (extm.duration + 1):
+                    logging.warning("hls-srv, invalid segment dur: %d-%d", seconds, extm.duration)
                     seconds = 0.1
                 continue
             elif len(line.strip()) == 0 or line[0] == "#":
@@ -1003,7 +1153,7 @@ class HlsService:
                 name, dstf = extm.next_name()
                 logging.info("hls-srv, changed new-segment: <%s> from %s", name, srcf)
                 try:
-                    movefile(srcf, dstf)
+                    shutil.move(srcf, dstf)
                 except: pass
                 extm.write(name, seconds)
             else:
@@ -1013,8 +1163,8 @@ class HlsService:
         os.sync()
         pass
 
-    def prepare_coder(self, source, fsrc, fdst, segtime):
-        if segtime < 5: segtime = 5
+    def prepare_coder(self, source, fsrc, fdst, sdur):
+        if sdur < 5: sdur = 5
         if not source or not fsrc or not fdst:
             logging.warning("hls-srv, invalid coder args")
             return False
@@ -1030,9 +1180,9 @@ class HlsService:
             if source != self.source:
                 logging.warning("hls-srv, another working: %s", self.source)
                 return False
-            self.last_coder_time = nowtime()
+            self.last_coder_time = CUtil.nowtime()
             return True
-        ret = self.start_coder(source, fsrc, fdst, segtime)
+        ret = self.start_coder(source, fsrc, fdst, sdur)
         return ret
 
     def on_hls_message(self, msg):
@@ -1041,7 +1191,7 @@ class HlsService:
             return
         logging.info("hls-srv, recv message: %s", msg.str())
         resp = HlsMessage("ack", msg.name)
-        if self.prepare_coder(msg.name, msg.fsrc, msg.fdst, msg.segtime):
+        if self.prepare_coder(msg.name, msg.fsrc, msg.fdst, msg.sdur):
             resp.result = True
         else:
             resp.result = False
@@ -1077,7 +1227,7 @@ class HlsService:
 
 
 def run_hls_service(conn, index):
-    set_log_file("hls_service_%d.txt" % index)
+    CUtil.set_log_file("hls_service_%d.txt" % index)
     logging.info("=====================\n\n")
     logging.info(["run_hls_service begin, pid", os.getpid(), os.getppid()])
     hls = HlsService(conn)
@@ -1094,8 +1244,8 @@ class HlsClient:
         self.child = child
         self.source = None
         self.tmp_source = None
-        self.last_backend_time = nowtime()
-        self.last_up_time = nowtime_sec()  #sec
+        self.last_backend_time = CUtil.nowtime()
+        self.last_up_time = CUtil.nowtime_sec()  #sec
 
     def no_focus(self):
         return (self.source is None) and (self.tmp_source is None)
@@ -1119,16 +1269,16 @@ class HlsClient:
         return state
 
     def is_backend_timeout(self):
-        return nowtime() >= self.last_backend_time + 3000
+        return CUtil.nowtime() >= self.last_backend_time + 3000
 
     def is_up_timeout(self):
-        return nowtime_sec() >= self.last_up_time + 3600*24
+        return CUtil.nowtime_sec() >= self.last_up_time + 3600*24
 
     def post_message(self, msg):
         self.conn.send(msg)
 
     def on_backend_message(self, msg):
-        self.last_backend_time = nowtime()
+        self.last_backend_time = CUtil.nowtime()
         if not msg:
             logging.info(["hls-cli, invalid msg:", msg])
             return
@@ -1202,7 +1352,7 @@ class HlsCenter:
                 break
             try:
                 #TODO: thread security
-                check_cache_timeout(self.dstPath, "index.m3u8", 1024*20, 3600*24)
+                Cache.check_timeout(self.dstPath, "index.m3u8", 1024*20, 3600*24)
                 self.clear_minfo(3600*4)
             except:
                 pass
@@ -1274,7 +1424,7 @@ class HlsCenter:
         self.mutex.release()
     def clear_minfo(self, sec=100):
         self.mutex.acquire()
-        now = nowtime_sec()
+        now = CUtil.nowtime_sec()
         timeouts = []
         for k,v in self.minfos.items():
             if now >= v.minfo_time + sec:
@@ -1287,26 +1437,6 @@ class HlsCenter:
 
 #======== parent-process web
 class MyHTTPRequestHandler:
-    server_version = "hlsvod/1.0"
-    support_exts = {
-        '.m3u8': True,
-        '.ts':   True,
-    }
-    extensions_map = {
-        '.gz': 'application/gzip',
-        '.Z': 'application/octet-stream',
-        '.bz2': 'application/x-bzip2',
-        '.xz': 'application/x-xz',
-        '.md': 'text/markdown',
-        '.mp4': 'video/mp4',
-        '.mov': 'video/quicktime',
-        #'.ts': 'video/mpegts',
-        '.ts': 'video/MP2T',
-        #'.m3u8': 'application/x-hls',
-        '.m3u8': 'application/x-mpegURL',
-        '.sh': "text/html",
-    }
-
     def __init__(self, srcPath=None, dstPath=None, maxCount=0):
         if srcPath is None:
              srcPath = os.getcwd()
@@ -1337,7 +1467,7 @@ class MyHTTPRequestHandler:
         agent = headers.get("User-Agent")
         raddr = self.get_raddr(request)
         prefix = "%s/" % self.hlskey
-        opath = self.translate_path(uri)
+        opath = CUtil.translate_path(uri)
 
         path = opath
         pos_prefix = opath.find(prefix)
@@ -1372,7 +1502,7 @@ class MyHTTPRequestHandler:
 
         ## check extensions
         parts = os.path.splitext(path)
-        if not self.support_exts.get(parts[1]):
+        if not CUtil.support_exts.get(parts[1]):
             logging.warning(["webhandler, unsupport media ext: ", path])
             return web.HTTPNotFound(reason="File not found")
 
@@ -1395,7 +1525,7 @@ class MyHTTPRequestHandler:
         hextm = MediaExtm3u8()
         hextm.parse(dst_fpath)
         if hextm.is_end:
-            try: touchpath(hextm.index_path())
+            try: CUtil.touchfile(hextm.index_path())
             except: pass
             # TODO: how to process playlist complete but segment not exists??
             return self.send_static(user_fpath, headers)
@@ -1451,15 +1581,14 @@ class MyHTTPRequestHandler:
         # fake m3u8 if possible
         body = None
         if agent.find("VLC/") != -1:
-            body = hextm.fakeVlcContent(message.segtime, minfo.duration())
+            body = hextm.fakeVlcContent(message.sdur, minfo.duration())
         elif hextm.curr_seq() < 3:
-            body = hextm.fakeVodContent(message.segtime)
+            body = hextm.fakeVodContent(message.sdur)
         if body:
             headers2 = {}
             headers2["Content-type"] = 'application/x-mpegURL'
             return web.Response(body=body, headers=headers2, status=200)
         return self.send_static(m3u8_fpath, headers)
-
 
     def get_raddr(self, request):
         raddr = None
@@ -1486,24 +1615,17 @@ class MyHTTPRequestHandler:
         if not self.check_modified(mtime, headers):
             return web.HTTPNotModified()
         headers2 = {}
-        headers2["Content-type"] = self.guess_type(fpath)
-        headers2["Last-Modified"] = self.date_time_string(mtime)
+        headers2["Content-type"] = CUtil.guess_type(fpath)
+        headers2["Last-Modified"] = CUtil.datetime_string(mtime)
         return web.FileResponse(path=fpath, headers=headers2, status=200)
 
     def read_mtime(self, fpath):
-        try:
-            mtime = 0
-            f = open(fpath, 'rb')
-            try:
-                fs = os.fstat(f.fileno())
-                mtime = fs.st_mtime
-            except:
-                return web.HTTPInternalServerError(), None
-            f.close()
-            return None, mtime
-        except:
-            pass
-        return web.HTTPNotFound(reason="File not found"), None
+        mtime = CUtil.parse_mtime(fpath)
+        if mtime == -2:
+            return web.HTTPInternalServerError(), None 
+        if mtime == -1:
+            return web.HTTPNotFound(reason="File not found"), None
+        return None, mtime
 
     def check_modified(self, mtime, headers):
         if not ("If-Modified-Since" in headers and "If-None-Match" not in headers):
@@ -1520,12 +1642,6 @@ class MyHTTPRequestHandler:
                 last_modif = last_modif.replace(microsecond=0)
                 return last_modif > ims
         return True
-
-    def parse_dirname(self, path):
-        if path.endswith('/'):
-            return os.path.dirname(path[:len(path)-1])
-        else:
-            return os.path.dirname(path)
 
     def list_directory(self, path, fpath):
         try:
@@ -1552,7 +1668,7 @@ class MyHTTPRequestHandler:
 
         if len(path) > 0:
             displayname = ".."
-            linkname = self.parse_dirname(path)
+            linkname = CUtil.parse_dirname(path)
             linkname = os.path.join("/", linkname)
             r.append('<li><a href="%s">%s</a></li>'
                     % (urllib.parse.quote(linkname, errors='surrogatepass'),
@@ -1580,46 +1696,6 @@ class MyHTTPRequestHandler:
         headers["Content-type"] = "text/html; charset=%s" % enc
         return web.Response(body=encoded, headers=headers)
 
-    def translate_path(self, uri):
-        # abandon query parameters
-        uri = uri.split('?',1)[0]
-        uri = uri.split('#',1)[0]
-        # Don't forget explicit trailing slash when normalizing. Issue17324
-        trailing_slash = uri.rstrip().endswith('/')
-        try:
-            uri = urllib.parse.unquote(uri, errors='surrogatepass')
-        except UnicodeDecodeError:
-            uri = urllib.parse.unquote(uri)
-        path = posixpath.normpath(uri)
-        words = path.split('/')
-        words = filter(None, words)
-        path = ""
-        for word in words:
-            if os.path.dirname(word) or word in (os.curdir, os.pardir):
-                # Ignore components that are not a simple file/directory name
-                continue
-            path = os.path.join(path, word)
-        if trailing_slash:
-            path += '/'
-        return path
-
-    def guess_type(self, fpath):
-        base, ext = posixpath.splitext(fpath)
-        if ext in self.extensions_map:
-            return self.extensions_map[ext]
-        ext = ext.lower()
-        if ext in self.extensions_map:
-            return self.extensions_map[ext]
-        guess, _ = mimetypes.guess_type(fpath)
-        if guess:
-            return guess
-        return 'application/octet-stream'
-
-    def date_time_string(self, timestamp=None):
-        if timestamp is None:
-            timestamp = time.time()
-        return email.utils.formatdate(timestamp, usegmt=True)
-
 
 async def run_web_server(handler):
     addr = "0.0.0.0"
@@ -1643,7 +1719,7 @@ async def run_other_task():
 def do_test_coder():
     #ftest = MediaExtm3u8()
     #ftest.open("index.m3u8", 5)
-    #print(ftest.last_seq, ftest.duration, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
+    #print(ftest.last_seq, ftest.sdur, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
     #ftest.close()
 
     coder = Transcoder()
@@ -1655,10 +1731,10 @@ def do_test_coder():
     coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
 
 def do_test():
-    set_log_file(None)
+    CUtil.set_log_file(None)
     logging.info("=======testing begin========")
-    #check_cache_timeout("/tmp/cached", "index.m3u8")
-    #check_cache_timeout("./samples/cached", "index.m3u8", 10, 100)
+    #Cache.check_timeout("/tmp/cached", "index.m3u8")
+    #Cache.check_timeout("./samples/cached", "index.m3u8", 10, 100)
     thread.start_new_thread(do_test_coder, ())
     time.sleep(300)
     pass
@@ -1667,7 +1743,7 @@ def do_main(srcPath, dstPath, maxCount, stdout=False):
     try:
         logf = "hls_client.txt"
         if stdout: logf = None
-        set_log_file(logf)
+        CUtil.set_log_file(logf)
         logging.info(["main, start...", srcPath, dstPath, maxCount])
 
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
@@ -1687,7 +1763,7 @@ def do_main(srcPath, dstPath, maxCount, stdout=False):
 
 # should use __main__ to support child-process
 if __name__ == "__main__":
-    set_log_path("/var/log/hlsvod")
+    CUtil.set_log_path("/var/log/hlsvod")
     #do_test()
     #do_main("/deepnas/home", "/opt/wspace/cache", 2)
     #do_main(None, "/home/linaro/wspace/hlscache", 2)
