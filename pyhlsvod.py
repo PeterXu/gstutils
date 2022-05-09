@@ -5,6 +5,7 @@
 ## prepare gst-python
 ## pip3 install aiohttp watchdog
 
+import gc
 import os
 import sys
 import re
@@ -350,6 +351,12 @@ class CGst:
 
     @classmethod
     def discover_info(cls, fname):
+        media = {}
+        media["container:"] = "mux"
+        media["unknown:"] = "mux"
+        media["audio:"] = "audio"
+        media["video:"] = "video"
+
         info = {}
         uri = urllib.parse.urljoin("file://", os.path.abspath(fname))
         shbin = "gst-discoverer-1.0 --use-cache -v \"%s\"" % uri
@@ -360,14 +367,17 @@ class CGst:
                 items = line[pos+10:].split(".")[0].split(":")
                 if len(items) == 3:
                     info["duration"] = int(items[0])*3600 + int(items[1])*60 + int(items[2])
-            elif line.find("container:") >= 0:
-                info["mux"] = cls.parse_discover_props(line, "container:")
-            elif line.find("unknown:") >= 0: 
-                info["mux"] = cls.parse_discover_props(line, "unknown:")
-            elif line.find("audio:") >= 0:
-                info["audio"] = cls.parse_discover_props(line, "audio:")
-            elif line.find("video:") >= 0:
-                info["video"] = cls.parse_discover_props(line, "video:")
+                continue
+            for k,v in media.items():
+                if line.find(k) == -1: continue
+                props = cls.parse_discover_props(line, k)
+                if not props: continue
+                v2 = "%s2" % v
+                if not info.get(v):
+                    info[v] = props
+                    info[v2] = []
+                else:
+                    info[v2].append(props)
         return info
 
     @classmethod
@@ -1028,8 +1038,10 @@ class HlsMessage:
         self.sdur = 10 #segment seconds
         self.quality = "default" #low/medium/high
         self.result = None
-    def str(self):
+    def debugStr(self):
         return "%s:%s:%s:%s" % (self.mtype, self.name, self.fsrc, self.fdst)
+    def str(self):
+        return "%s:%s" % (self.mtype, self.name)
 
 class HlsService:
     def __init__(self, conn):
@@ -1086,6 +1098,7 @@ class HlsService:
             logging.info("hls-srv, coder stop...")
             coder.do_stop()
         self._reset()
+        gc.collect()
 
     def start_coder(self, source, fsrc, fdst, sdur):
         minfo = MediaInfo()
@@ -1159,7 +1172,7 @@ class HlsService:
                 isSeg = False
                 srcf = os.path.join(path, line.strip())
                 name, dstf = extm.next_name()
-                logging.info("hls-srv, changed new-segment: <%s> from %s", name, srcf)
+                logging.info("hls-srv, changed new-segment: <%s> from %s", name, line)
                 try:
                     shutil.move(srcf, dstf)
                 except: pass
@@ -1195,7 +1208,7 @@ class HlsService:
 
     def on_hls_message(self, msg):
         if not msg:
-            logging.warning("hls-srv, invalid msg: %s", msg.str())
+            logging.warning("hls-srv, invalid msg: %s", msg.debugStr())
             return
         logging.info("hls-srv, recv message: %s", msg.str())
         resp = HlsMessage("ack", msg.name)
@@ -1601,11 +1614,13 @@ class MyHTTPRequestHandler:
         return self.send_static(m3u8_fpath, headers)
 
     def get_raddr(self, request):
-        raddr = None
-        sock = request.get_extra_info('socket')
-        if sock:
-            raddr = sock.getpeername()
-            raddr = "%s:%s" % (raddr[0], raddr[1])
+        try:
+            raddr = None
+            sock = request.get_extra_info('socket')
+            if sock:
+                raddr = sock.getpeername()
+                raddr = "%s:%s" % (raddr[0], raddr[1])
+        except: pass
         return raddr
 
     async def do_File(self, request):
@@ -1726,12 +1741,26 @@ async def run_other_task():
         await asyncio.sleep(10)
 
 
-def do_test_coder():
-    #ftest = MediaExtm3u8()
-    #ftest.open("index.m3u8", 5)
-    #print(ftest.last_seq, ftest.sdur, ftest.probe_pos, ftest.is_begin, ftest.is_end, ftest)
-    #ftest.close()
 
+def do_test_minfo():
+    minfo = MediaInfo()
+    minfo.parse("./samples/test_hevc2.mkv")
+    print(minfo.info)
+    pass
+
+def do_test_cache():
+    #Cache.check_timeout("/tmp/cached", "index.m3u8")
+    Cache.check_timeout("./samples/cached", "index.m3u8", 10, 100)
+    pass
+
+def do_test_hls():
+    ft = MediaExtm3u8()
+    ft.open("index.m3u8", 5)
+    print(ft.last_seq, ft.sdur, ft.probe_pos, ft.is_begin, ft.is_end)
+    ft.close()
+    pass
+
+def do_test_coder():
     coder = Transcoder()
     #coder.do_hlsvod("samples/testCN.mkv", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test.mkv", "/tmp/output", 0, 5)
@@ -1740,12 +1769,17 @@ def do_test_coder():
     #coder.do_hlsvod("samples/test_hd.mov", "/tmp/output", 0, 5)
     coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
 
+def do_test_loop():
+    do_test_minfo()
+    #do_test_cache()
+    #do_test_hls()
+    #do_test_coder()
+    pass
+
 def do_test():
     CUtil.set_log_file(None)
     logging.info("=======testing begin========")
-    #Cache.check_timeout("/tmp/cached", "index.m3u8")
-    #Cache.check_timeout("./samples/cached", "index.m3u8", 10, 100)
-    thread.start_new_thread(do_test_coder, ())
+    thread.start_new_thread(do_test_loop, ())
     time.sleep(300)
     pass
 

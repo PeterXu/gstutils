@@ -69,7 +69,7 @@ do_convert_audio() {
 mkdir -p /tmp/samples
 fnames=$(ls samples/small.*)
 for name in $fnames; do
-	audio=$(gst-discoverer-1.0 -v $name 2>/dev/null | grep "audio:" | awk -F" " '{print $2}' | awk -F"," '{print $1}')
+	audio=$(gst-discoverer-1.0 -v $name 2>/dev/null | grep "audio:" | awk -F" " '{print $2}' | awk -F"," '{print $1}' | head -1)
 	video=$(gst-discoverer-1.0 -v $name 2>/dev/null | grep "video:" | awk -F" " '{print $2}' | awk -F"," '{print $1}')
 	echo "\n===================="
 	echo $name, $audio, $video
