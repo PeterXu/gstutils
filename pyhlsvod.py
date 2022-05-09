@@ -41,6 +41,14 @@ except:
     pass
 Gst.init(None)
 
+def preload_check():
+    preload = os.environ.get("LD_PRELOAD")
+    deepfs = os.environ.get("DEEPFS_SO")
+    try:
+        items = os.listdir("/deepnas/")
+    except: items = []
+    logging.info(["preload-check:", preload, deepfs, items])
+
 
 #===== common utils
 class CUtil:
@@ -1227,9 +1235,11 @@ class HlsService:
 
 
 def run_hls_service(conn, index):
+    CUtil.set_log_path("/var/log/hlsvod")
     CUtil.set_log_file("hls_service_%d.txt" % index)
     logging.info("=====================\n\n")
     logging.info(["run_hls_service begin, pid", os.getpid(), os.getppid()])
+    preload_check()
     hls = HlsService(conn)
     hls.run_forever()
     conn.close()
@@ -1744,7 +1754,9 @@ def do_main(srcPath, dstPath, maxCount, stdout=False):
         logf = "hls_client.txt"
         if stdout: logf = None
         CUtil.set_log_file(logf)
-        logging.info(["main, start...", srcPath, dstPath, maxCount])
+        logging.info("=====================\n\n")
+        logging.info(["run_main, start...", srcPath, dstPath, maxCount])
+        preload_check()
 
         handler = MyHTTPRequestHandler(srcPath, dstPath, maxCount)
         handler.init()
