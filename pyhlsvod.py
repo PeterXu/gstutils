@@ -292,6 +292,20 @@ class CGst:
         return cls.make_elem_name(name, props)
 
     @classmethod
+    def make_vdec_name(cls, vtype, vsize):
+        name = None
+        if vtype == "video/x-h265" or vtype == "video/x-h264":
+            name = cls.check_elem_name("mppvideodec")
+            if name and vsize:
+                props = {}
+                props["format"] = 2
+                props["width"] = vsize[0]
+                props["height"] = vsize[1]
+                name = cls.make_elem_name(name, props)
+        if not name: name = "decodebin"
+        return name
+
+    @classmethod
     def ts_mux_profile(cls):
         return "video/mpegts,systemstream=true,packetsize=188"
 
@@ -401,15 +415,18 @@ class CGst:
 
 #===== hls tools
 class CHls:
+    max_w = 1920
+    max_h = 1080
+
     # @return [min_kbps, max_kbps, width, height]
     @classmethod
     def correct_video_size(cls, width, height, fps=24):
-        if width > 1920:
-            height = int(height * 1920 / width / 4) * 4
-            width = 1920
-        if height > 1080:
-            width = int(width * 1080 / height / 4) * 4
-            height = 1080
+        if width > cls.max_w:
+            height = int(height * cls.max_w / width / 4) * 4
+            width = cls.max_w
+        if height > cls.max_h:
+            width = int(width * cls.max_h / height / 4) * 4
+            height = cls.max_h
         if fps <= 0: fps = 20
         elif fps >= 30: fps = 30
         kbps = [300, 600]
@@ -846,11 +863,13 @@ class Transcoder(object):
         aType = minfo.audioType()
         vType = minfo.videoType()
         vSize = None
+        vDec = None
         if vType:
             vSize = CHls.correct_video_size(minfo.width(), minfo.height(), minfo.frameRate())
             if vkbps > vSize[1]: vkbps = vSize[1]
             elif vkbps < vSize[0]: vkbps = vSize[0]
-        logging.info(["gst-coder, media-type:", mType, aType, vType, vkbps, vSize])
+            vDec = CGst.make_vdec_name(vType, vSize[2:])
+        logging.info(["gst-coder, media-type:", mType, aType, vType, vkbps, vSize, vDec])
 
         mux = CGst.ts_mux_profile()
         aac = CGst.aac_enc_profile(akbps)
@@ -878,7 +897,7 @@ class Transcoder(object):
         parts2 = []
         if vType:
             parts2.append("proxysrc name=psrc0")
-            parts2.append("decodebin name=db0")
+            parts2.append("%s name=db0" % vDec)
         if aType:
             parts2.append("proxysrc name=psrc1")
             parts2.append("decodebin name=db1")
@@ -888,7 +907,7 @@ class Transcoder(object):
 
         if vType:
             queue = CGst.make_queue_name(0, 0)
-            parts2.append("psrc0. ! db0.")
+            parts2.append("psrc0. ! queue ! db0.")
             parts2.append("db0. ! video/x-raw ! %s ! eb.video_0" % queue)
         if aType:
             queue = CGst.make_queue_name(0, 0)
@@ -1767,13 +1786,14 @@ def do_test_coder():
     #coder.do_hlsvod("samples/test_video.ts", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_audio.ts", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_hd.mov", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
+    #coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
+    coder.do_hlsvod("samples/test_hevc2.mkv", "/tmp/output", 0, 10)
 
 def do_test_loop():
-    do_test_minfo()
+    #do_test_minfo()
     #do_test_cache()
     #do_test_hls()
-    #do_test_coder()
+    do_test_coder()
     pass
 
 def do_test():
@@ -1811,7 +1831,7 @@ def do_main(srcPath, dstPath, maxCount, stdout=False):
 if __name__ == "__main__":
     CUtil.set_log_path("/var/log/hlsvod")
     #do_test()
-    #do_main("/deepnas/home", "/opt/wspace/cache", 2)
+    #do_main("/deepnas/home", "/opt/hlscache", 2)
     #do_main(None, "/home/linaro/wspace/hlscache", 2)
     do_main(None, None, 1, True)
     sys.exit(0)
