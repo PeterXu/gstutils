@@ -745,7 +745,14 @@ class MediaInfo(object):
     def muxType(self):
         return self.mediaType("mux")
     def audioType(self):
-        return self.mediaType("audio")
+        atype = self.mediaType("audio")
+        if atype == "audio/x-private1-ac3":
+            for item in self.info.get("audio2", []):
+                ttype = item.get("type")
+                if ttype != "audio/x-private1-ac3":
+                    atype = ttype
+                    break
+        return atype
     def videoType(self):
         return self.mediaType("video")
 
@@ -1787,7 +1794,8 @@ def do_test_coder():
     #coder.do_hlsvod("samples/test_audio.ts", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_hd.mov", "/tmp/output", 0, 5)
     #coder.do_hlsvod("samples/test_hevc.mkv", "/tmp/output", 0, 5)
-    coder.do_hlsvod("samples/test_hevc2.mkv", "/tmp/output", 0, 10)
+    #coder.do_hlsvod("samples/test_hevc2.mkv", "/tmp/output", 0, 10)
+    coder.do_hlsvod("samples/test_mpeg_hd.vob", "/tmp/output", 0, 10)
 
 def do_test_loop():
     #do_test_minfo()
