@@ -100,7 +100,8 @@ class CUtil:
 
     @classmethod
     def datetime_string(cls, timestamp=None):
-        if timestamp is None: timestamp = time.time()
+        if timestamp is None:
+            timestamp = time.time()
         return email.utils.formatdate(timestamp, usegmt=True)
 
     @classmethod
@@ -111,7 +112,8 @@ class CUtil:
     @classmethod
     def parse_dirname(cls, path):
         fpath = path
-        if path.endswith('/'): fpath = path[:len(path)-1]
+        if path.endswith('/'):
+            fpath = path[:len(path)-1]
         return os.path.dirname(fpath)
 
     @classmethod
@@ -192,6 +194,12 @@ class CUtil:
         else:
             logging.basicConfig(filename=fname, format=logfmt, datefmt=datefmt, level=logging.INFO)
         pass
+
+    @classmethod
+    def is_simple_vod(cls, agent):
+        if agent.find("VLC/") != -1 or agent.find("AppleCoreMedia") != -1:
+            return False
+        return True
 
 
 #===== cache checking
@@ -294,11 +302,12 @@ class CGst:
     @classmethod
     def make_vdec_name(cls, vtype, vsize):
         name = None
-        if vtype == "video/x-h265" or vtype == "video/x-h264":
+        hw_codecs = ["video/x-h265", "video/x-h264", "video/x-vp8", "video/x-vp9"]
+        if vtype in hw_codecs:
             name = cls.check_elem_name("mppvideodec")
             if name and vsize:
                 props = {}
-                props["format"] = 2
+                props["format"] = "NV12"
                 props["width"] = vsize[0]
                 props["height"] = vsize[1]
                 name = cls.make_elem_name(name, props)
@@ -392,6 +401,16 @@ class CGst:
                     info[v2] = []
                 else:
                     info[v2].append(props)
+        if info.get("duration") == 0:
+            shbin = "ffprobe \"%s\" 2>&1" % os.path.abspath(fname)
+            lines = os.popen(shbin)
+            for line in lines:
+                if line.find("Duration: ") >= 0:
+                    pos = line.find("Duration: ")
+                    items = line[pos+10:].split(".")[0].split(":")
+                    if len(items) == 3:
+                        info["duration"] = int(items[0])*3600 + int(items[1])*60 + int(items[2])
+                    break
         return info
 
     @classmethod
@@ -401,11 +420,16 @@ class CGst:
         if not ret or len(ret.groups()) <= 1: return None
         stype, sval = ret.groups()[0:2]
         if stype == "fraction":
-            ival = 0
+            k = 0
+            ival = [0, 0]
             for ch in sval:
-                if ch >= '0' and ch <= '9': ival = ival * 10 + int(ch)
-                else: break
-            return ival
+                if k > 1: break
+                if ch >= '0' and ch <= '9':
+                    ival[k] = ival[k] * 10 + int(ch)
+                else:
+                    k += 1
+            if ival[1] == 0: ival[1] = 1
+            return int(ival[0] / ival[1])
         elif stype == "int":
             return int(sval)
         elif stype == "boolean":
@@ -415,18 +439,23 @@ class CGst:
 
 #===== hls tools
 class CHls:
-    max_w = 1920
-    max_h = 1080
+    max_x = 1920
+    max_y = 1080
 
     # @return [min_kbps, max_kbps, width, height]
     @classmethod
     def correct_video_size(cls, width, height, fps=24):
-        if width > cls.max_w:
-            height = int(height * cls.max_w / width / 4) * 4
-            width = cls.max_w
-        if height > cls.max_h:
-            width = int(width * cls.max_h / height / 4) * 4
-            height = cls.max_h
+        dx, dy = width, height
+        if width < height: dx, dy = height, width
+        if dx > cls.max_x:
+            dy = int(dy * cls.max_x / dx / 4) * 4
+            dx = cls.max_x
+        if dy > cls.max_y:
+            dx = int(dx * cls.max_y / dy / 4) * 4
+            dy = cls.max_y
+        if width < height: width, height = dy, dx
+        else: width, height = dx, dy
+
         if fps <= 0: fps = 20
         elif fps >= 30: fps = 30
         kbps = [300, 600]
@@ -667,9 +696,9 @@ class MediaExtm3u8(object):
         except:
             return None
         return fdata.replace("#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-PLAYLIST-TYPE:EVENT")
-    def fakeVlcContent(self, seconds, duration):
+    def fakeFullContent(self, seconds, duration):
         maxSeq = int(duration/seconds + 0.9)
-        logging.info(["fakeVlc, total-duration", duration, maxSeq])
+        logging.info(["fakeFull, total-duration", duration, maxSeq])
         if maxSeq > 0:
             return self.fakeVodContent(seconds, maxSeq)
         else:
@@ -680,6 +709,7 @@ class MediaExtm3u8(object):
         for i in range(maxSeq):
             name = CHls.segment_name(i)
             lines.append(CHls.get_one(name, seconds))
+        lines.append(CHls.get_end())
         return "".join(lines)
 
     def _parse(self, lines, seconds, strongCheck=True):
@@ -766,7 +796,9 @@ class MediaInfo(object):
     def frameRate(self):
         value = self.info.get("video", {}).get("more", {}).get("framerate", 0)
         if type(value) == int: return value
-        return CGst.parse_discover_value(value)
+        fps = CGst.parse_discover_value(value)
+        if fps == 0: fps = 30
+        return fps
     def width(self):
         value = self.info.get("video", {}).get("more", {}).get("width", 0)
         if type(value) == int: return value
@@ -777,6 +809,7 @@ class MediaInfo(object):
         return CGst.parse_discover_value(value)
 
     def isWebDirectSupport(self):
+        return False
         mux = self.muxType()
         if mux == "video/quicktime" or mux == "application/x-3gp" or mux == "audio/x-m4a":
             audio = self.audioType()
@@ -818,9 +851,9 @@ class MediaInfo(object):
             fps = self.frameRate()
             width = self.width()
             height = self.height()
-            if fps == 0 or width == 0 or height == 0:
+            logging.info(["minfo, check video", width, height, fps])
+            if width == 0 or height == 0:
                 return False
-            logging.info(["minfo, have video", width, height, fps])
         else:
             logging.info("minfo, no video")
         return True
@@ -869,8 +902,7 @@ class Transcoder(object):
         mType = minfo.muxType()
         aType = minfo.audioType()
         vType = minfo.videoType()
-        vSize = None
-        vDec = None
+        vSize, vDec = None, None
         if vType:
             vSize = CHls.correct_video_size(minfo.width(), minfo.height(), minfo.frameRate())
             if vkbps > vSize[1]: vkbps = vSize[1]
@@ -1605,7 +1637,7 @@ class MyHTTPRequestHandler:
                 logging.warning(["webhandler, segment prepare failed:", path])
                 return web.HTTPTooManyRequests()
             stime = 1
-            if not os.path.isfile(seg_fpath) and agent.find("VLC/") != -1:
+            if not os.path.isfile(seg_fpath) and CUtil.is_simple_vod(agent):
                 stime = 2
             await asyncio.sleep(stime)
             return self.send_static(seg_fpath, headers)
@@ -1629,8 +1661,8 @@ class MyHTTPRequestHandler:
 
         # fake m3u8 if possible
         body = None
-        if agent.find("VLC/") != -1:
-            body = hextm.fakeVlcContent(message.sdur, minfo.duration())
+        if CUtil.is_simple_vod(agent):
+            body = hextm.fakeFullContent(message.sdur, minfo.duration())
         elif hextm.curr_seq() < 3:
             body = hextm.fakeVodContent(message.sdur)
         if body:
@@ -1771,7 +1803,7 @@ async def run_other_task():
 def do_test_minfo():
     minfo = MediaInfo()
     minfo.parse("./samples/test_hevc2.mkv")
-    print(minfo.info)
+    print(minfo.info, minfo.frameRate())
     pass
 
 def do_test_cache():
@@ -1798,10 +1830,10 @@ def do_test_coder():
     coder.do_hlsvod("samples/test_mpeg_hd.vob", "/tmp/output", 0, 10)
 
 def do_test_loop():
-    #do_test_minfo()
+    do_test_minfo()
     #do_test_cache()
     #do_test_hls()
-    do_test_coder()
+    #do_test_coder()
     pass
 
 def do_test():
