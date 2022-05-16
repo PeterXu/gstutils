@@ -1,10 +1,14 @@
 (
-pkill -f "pyhlsvod.py"
-pkill -f "multiprocessing.*_tracker"
-pkill -f "multiprocessing.spawn"
-sleep 1
+while [ ! -f "/opt/media/env.sh" ];
+do
+    pkill -f "pyhlsvod.py"
+    pkill -f "multiprocessing.*_tracker"
+    pkill -f "multiprocessing.spawn"
+    sleep 3
+done
+sleep 3
 
-[ -f "/opt/media/env.sh" ] && . /opt/media/env.sh
+. /opt/media/env.sh
 [ -f "/opt/media/wspace/pyhlsvod.py" ] && cd /opt/media/wspace
 
 rm -f nohup.out
